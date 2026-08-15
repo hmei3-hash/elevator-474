@@ -1,0 +1,40 @@
+# ---- Arduino / ESP32 build artifacts ----
+build/
+*.bin
+*.elf
+*.map
+*.hex
+*.d
+*.o
+*.a
+.build/
+*.ino.cpp
+
+# Arduino IDE 2.x
+.theia/
+sketch.yaml
+
+# arduino-cli
+.arduino15/
+
+# PlatformIO, in case anyone opens this there
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# ---- Host test artifacts ----
+logic/test/test_logic
+logic/test/*.out
+*.gcda
+*.gcno
+
+# ---- Editors ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
