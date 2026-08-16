@@ -8,28 +8,32 @@ Two-board ESP32 smart elevator. CSE/EE 474 Embedded Systems final project.
 
 ## Status
 
-**Skeleton. Every function body is a `// TODO:` stub.**
+**Drivers integrated and bench-verified. Mechanics not built.**
 
-Nothing in this repository has been run on hardware. Every row in
-[`docs/vv_table.md`](docs/vv_table.md) is `NOT TESTED`. No pin has been
-verified against a physical wire, no tuning constant has been chosen, and
-no algorithm has been written.
+Every peripheral except the stepper's UART channel has answered on the
+bench. No end-to-end run has happened, and every row in
+[`docs/vv_table.md`](docs/vv_table.md) is still `NOT TESTED`.
 
-This is deliberate. The structure, the layering, and the interfaces between
-the two boards are settled first; the bodies get filled in one at a time,
-each against a measurement. See [Approval boundaries](#approval-boundaries).
+Each module was proven as a standalone sketch first and only then folded
+into the layered structure here — see [Approval
+boundaries](#approval-boundaries) and the workflow in `CLAUDE.md`. What went
+wrong along the way is recorded in [What we got
+wrong](#what-we-got-wrong), including the failures that did not announce
+themselves.
 
 | Component | State |
 |---|---|
 | Repository structure | Complete |
 | Task/core/priority plan | Complete, not yet validated on hardware |
 | Link protocol | Defined, both copies verified identical |
-| Pin assignments | Assigned from the datasheet, **not verified against wiring** |
-| Driver bodies | Stubs |
-| Control policy | Stubs |
-| Fall detection | Stubs |
-| Host-testable logic | Stubs, harness builds and runs |
+| Pin assignments | `board_config.h` is authoritative; A-board wiring in progress |
+| Driver bodies | **Integrated from bench-proven prototypes**: IMU, stepper, encoder, RFID, LCD, ultrasonic, link |
+| Control policy | Servo loop integrated; floor mapping and homing await the built shaft |
+| Fall detection | **Thresholds derived from 246 s of labelled bench data**; detector not yet written |
+| Host-testable logic | PID filled; moving average and test cases still stubs |
+| PID gains | `0.0f` on purpose — tuned at 1 kHz, must be retuned at 100 Hz |
 | Stack sizes, queue depths | Placeholders pending measurement |
+| Mechanical build | **Not started. The critical path.** |
 
 ---
 
@@ -361,6 +365,190 @@ how a wiring fault gets misdiagnosed as a software bug at 2 a.m.
 7. **Safety path last.** VV-13 (cut Board B's power mid-travel) and VV-14
    (trigger a fall mid-travel) are the tests that matter most and are
    easiest to fake. Record video of both.
+
+---
+
+## What we got wrong
+
+Kept deliberately, and kept honest. Every entry below cost real time, and
+several would have survived to the demo if they had not been caught. This
+section feeds the "what you fixed" chapter of the AI report directly.
+
+### 1. Two sources of truth for pin assignments
+
+**Issue.** The bench prototypes and `board_config.h` drifted apart. At one
+point the stepper block's comment said `SDA=8, SCL=9` while the `#define`
+right below it said `14` and `13`. The RFID prototype used GPIO 4, 5 and 6
+— which are the stepper's EN, STEP and DIR. Wiring both at once would have
+shorted two subsystems together.
+
+**Cause.** Prototypes were written against whatever pins were free at the
+time, and nobody declared which file won.
+
+**Fix.** `board_config.h` is authoritative, stated in the file header and in
+`CLAUDE.md`. Prototype pins were moved to match it, never the reverse.
+`docs/pinmap.md` records the physical wiring; the header mirrors it.
+
+**Evidence.** Pin table in `docs/pinmap.md`; the "This header is
+authoritative" note in `board_config.h`.
+
+### 2. An IMU axis died silently for 51 seconds
+
+**Issue.** In the 297-second drop-data session, `az` sat at exactly 32767 —
+full scale, 16 g — for the first 51 seconds and then recovered. A stationary
+sensor cannot read 16 g. Seventeen percent of the session was fabricated
+data that looked entirely plausible in a serial monitor.
+
+**Cause.** Almost certainly an intermittent connection. A partly-seated
+jumper on a breadboard row that had earlier had a broken pin pushed into it.
+
+**Fix.** `analyze_falls.py` now detects stuck-axis runs and cuts them before
+deriving anything. The remaining 246 seconds were used.
+
+**Why it matters more than it looks.** This is the failure mode that does
+*not* announce itself. A disconnected sensor stops responding and every
+check catches it; a stuck axis keeps streaming numbers. Any threshold fitted
+across that block would have been quietly wrong.
+
+**Evidence.** `imu_data.csv`; the STUCK-AXIS block in the analysis output.
+
+### 3. The encoder magnet ended up inside the motor
+
+**Issue.** The motor vibrated in place instead of turning, and the AS5600
+reported `TOO WEAK` at the same time. Two subsystems failing at once
+suggested two problems.
+
+**Cause.** One problem. A neodymium magnet near a stepper is pulled into it;
+once inside it fought the rotor's field, and the encoder was left reading
+stray flux.
+
+**Fix.** The magnet mounts on the shaft *end*, outside the motor body, on a
+non-ferrous spacer. A steel spacer would conduct the motor's flux straight
+to the sensor.
+
+**Lesson.** When two subsystems fail simultaneously, look for one cause
+before assuming two.
+
+### 4. A stall counter that only counted up
+
+**Issue.** The prototype's stall detector incremented a counter while the
+stall condition held, and never cleared it when the condition lapsed.
+Unrelated near-stalls minutes apart would accumulate and eventually latch a
+fault that never happened.
+
+**Cause.** The counter was `static` inside the `if` body, so the reset path
+had nowhere to live.
+
+**Fix.** The counter is cleared on every iteration the condition does not
+hold. See `control.cpp`.
+
+### 5. A blocking serial read inside a 1 kHz control loop
+
+**Issue.** `Serial.readStringUntil('\n')` has a one-second default timeout.
+A single stray byte with no newline would freeze the control loop for a
+second — with the motor running.
+
+**Cause.** Command parsing shared a loop with control, which is normal in a
+prototype and unacceptable in the real system.
+
+**Fix.** Command handling moved out of the control path entirely at
+integration.
+
+### 6. A buffer overread in the RFID comparison
+
+**Issue.** The prototype compared `rfid.uid.size` bytes against a 4-byte
+authorised-UID array. Plenty of MIFARE cards have 7-byte UIDs, and those
+would have read three bytes past the end of the array.
+
+**Cause.** UID length was assumed rather than checked.
+
+**Fix.** `rc522.cpp` carries the length explicitly and compares lengths
+before contents.
+
+### 7. Authorisation logic living in a driver
+
+**Issue.** The prototype decided access inside the card-reading code.
+
+**Cause.** Convenience — it is where the UID already is.
+
+**Fix.** The driver reports a UID and nothing else. Deciding what a card is
+allowed to do is application policy. A driver that knows about
+authorisation has to change every time the policy does.
+
+### 8. Fixed-window segmentation found nothing in good data
+
+**Issue.** The first pass at the drop analysis cut a window around each
+`FALL` label and found no free-fall in any of them — every feature
+overlapped with normal handling. The data looked useless.
+
+**Cause.** The operator types the label and *then* picks up the rig and
+drops it, one to three seconds later. The label marks intent, not the event.
+
+**Fix.** Detect episodes from the signal — the physics is unambiguous — and
+use the labels only to attribute them afterwards. This is also closer to
+what the on-target detector does.
+
+**Result.** Ten real drops, and three features that separate perfectly.
+
+### 9. Assuming ±16 g was wide enough
+
+**Issue.** The accelerometer range was set to its widest on the argument
+that impacts exceed 4 g. Composite peaks still reached 21–25 g, meaning
+individual axes clipped at 16 g during landings.
+
+**Cause.** The estimate was for a single axis; the vector magnitude of three
+axes can exceed any one of them.
+
+**Fix.** Accepted rather than corrected. Free-fall detection reads the
+*low*-g phase, where nothing clips, and the impact test only asks whether
+the peak is large. A clipped large value is still large. The clipping is
+recorded so nobody later mistakes a bounded peak for a measured one.
+
+### 10. PID gains assumed to be portable across loop rates
+
+**Issue.** The prototype's gains were tuned with the loop at 1 kHz. The
+architecture runs `controlTask` at 100 Hz.
+
+**Cause.** Gains feel like properties of the plant. Two of the three are
+properties of the plant *and the sample interval*.
+
+**Fix.** Gains ship as `0.0f` with a retuning procedure beside them, so the
+system compiles and refuses to move rather than moving wrongly. Caught
+before hardware, not after.
+
+### 11. Git lock files left behind by a tool that cannot delete
+
+**Issue.** `git branch -M main` failed with "another git process seems to be
+running", and `.git/HEAD.lock`, `.git/index.lock` and
+`.git/objects/maintenance.lock` were unremovable from the environment that
+created them.
+
+**Cause.** The repository was initialised from a sandbox whose mount is
+write-but-not-delete. Git creates lock files and removes them on exit; the
+removal silently failed.
+
+**Fix.** Deleted the locks from Windows, and all subsequent git work is done
+natively. Forty-two orphaned `tmp_obj_*` files remain in `.git/objects` and
+are harmless; `git gc --prune=now` clears them.
+
+### 12. A placeholder pasted into a real command
+
+**Issue.** `git remote add origin https://github.com/<username>/...` was run
+with the placeholder text still in it, and the second, correct `remote add`
+was rejected because origin already existed.
+
+**Fix.** `git remote set-url`. Commands handed over now carry real values,
+never placeholders.
+
+### 13. Spinning a stepper straight to full rate
+
+**Issue.** The blind-spin test jumped from standstill to 3.3 kHz with no
+ramp, and the motor stalled immediately.
+
+**Cause.** A test written to be short rather than correct.
+
+**Fix.** Acceleration limiting exists in `control.cpp` for exactly this
+reason; the test is the only place it was missing.
 
 ---
 
