@@ -7,6 +7,10 @@
  *    channel. Speaks only in steps, direction, and enable state. It has no
  *    knowledge of what the motor is attached to.
  *
+ *    Step pulses are produced by a hardware timer ISR running a phase
+ *    accumulator, so the caller sets a RATE and the pulse train continues
+ *    without further attention. Nothing here blocks.
+ *
  * AUTHOR:
  *    Hongyi Mei / Kevin Bi
  *
@@ -14,7 +18,7 @@
  *    08/15/2026
  *
  * LAST MODIFIED:
- *    08/15/2026
+ *    08/16/2026
  *
  * DEPENDENCIES:
  *    - Arduino.h: GPIO and HardwareSerial types
@@ -22,7 +26,8 @@
  * NOTES:
  *    Driver layer. Must not reference application concepts.
  *    All public functions are called from a single task; this driver is not
- *    internally synchronised.
+ *    internally synchronised beyond the spinlock guarding the ISR handoff.
+ *
  * ============================================================================
  */
 
@@ -30,16 +35,11 @@
 
 #include <Arduino.h>
 
-/** Direction of rotation as seen by the driver hardware. */
-typedef enum {
-    STEPPER_DIR_FORWARD = 0,
-    STEPPER_DIR_REVERSE = 1
-} stepper_dir_t;
-
 /**
- * Configure the driver pins and open the UART control channel.
+ * Configure the driver pins, open the UART control channel, apply the
+ * current and microstep settings, and start the step pulse timer.
  *
- * @return true on success, false if the driver did not answer on UART
+ * @return true if the driver answered on UART with the expected version
  * Called from: setup(), before tasks start.
  */
 bool stepper_init(void);
@@ -54,34 +54,29 @@ bool stepper_init(void);
 void stepper_enable(bool on);
 
 /**
- * Set the direction applied on the next step pulse.
+ * Command a signed step rate. Sign selects direction; magnitude is clamped
+ * to STEP_MAX_SPS. Zero stops the pulse train without releasing the coils.
  *
- * @param dir  requested direction
+ * @param steps_per_sec  signed rate; positive is the direction that makes
+ *                       stepper_get_position() increase
  * @return void
  * Called from: controlTask (Core 1, 100 Hz).
  */
-void stepper_set_direction(stepper_dir_t dir);
+void stepper_set_rate(float steps_per_sec);
 
 /**
- * Request a constant step rate. The driver emits pulses at this rate until
- * asked to change or stop.
+ * Read the signed count of step pulses emitted since init. This is the
+ * COMMANDED position, not a measurement: it does not know about missed
+ * steps. Compare it against an encoder to detect those.
  *
- * @param steps_per_sec  pulse rate in steps per second; 0 stops pulsing
- * @return void
- * Called from: controlTask (Core 1, 100 Hz).
- */
-void stepper_set_rate(uint32_t steps_per_sec);
-
-/**
- * Read the signed count of step pulses emitted since init.
- *
- * @return step count; positive is STEPPER_DIR_FORWARD
+ * @return step count; positive is the direction of a positive rate
  * Called from: controlTask (Core 1, 100 Hz).
  */
 int32_t stepper_get_position(void);
 
 /**
- * Stop pulsing immediately without waiting for the current motion to finish.
+ * Stop pulsing immediately and release the coils. Safe to call repeatedly
+ * and safe to call before init.
  *
  * @return void
  * Called from: controlTask (Core 1, 100 Hz), on the emergency path.

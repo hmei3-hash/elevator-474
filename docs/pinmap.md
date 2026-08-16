@@ -46,12 +46,26 @@ wrong.
 | GPIO43, 44 | UART0 console |
 | GPIO38 | On-board RGB LED |
 
+## Board assignment
+
+The two DevKitC-1 boards are physically identical and must be told apart by
+label, not by memory. Put a piece of tape on each one.
+
+| Board | Role | Who holds it |
+|---|---|---|
+| **B** | Fall detector: MPU6050 only, transmits over ESP-NOW | **Hongyi** (this is the board the IMU bring-up was done on) |
+| A | Elevator controller: stepper, encoder, ultrasonic, LCD, RFID, buttons | to be confirmed |
+
+Getting this backwards costs an evening: a swapped peer MAC makes
+`esp_now_send()` report SUCCESS while nothing ever arrives, and the first
+things anyone suspects are the antenna, the channel, and the code.
+
 ## Hardware addresses
 
 | Item | Value | Filled by |
 |---|---|---|
-| Board A STA MAC | | |
+| Board A STA MAC | `80:B5:4E:E3:22:50` | mac_print, 2026-08-15 -- **RECHECK: confirm this is the controller board, not the one now carrying the IMU** |
 | Board B STA MAC | | |
 | LCD I2C address | | |
 | IMU I2C address | | |
-| WiFi channel | | |
+| WiFi channel | 1 | mac_print, 2026-08-15 |

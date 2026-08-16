@@ -61,6 +61,7 @@ Two × **ESP32-S3-DevKitC-1**, module **ESP32-S3-WROOM-1 N16R8**
 |---|---|---|
 | NEMA-17 stepper + TMC2209 driver | STEP/DIR/EN + UART | Car motion |
 | HC-SR04 ultrasonic rangefinder | Trigger + echo pulse | Car position feedback |
+| AS5600 magnetic rotary encoder | I2C | Motor shaft angle, closed-loop position |
 | 1602 character LCD | I2C (PCF8574 backpack) | Passenger display |
 | RC522 contactless card reader | SPI | Card authentication |
 | 3 × pushbutton | GPIO, `INPUT_PULLUP` | Car-panel floor selection |

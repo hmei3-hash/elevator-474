@@ -12,11 +12,22 @@
  *    08/15/2026
  *
  * LAST MODIFIED:
- *    08/15/2026
+ *    08/16/2026
  *
  * DEPENDENCIES:
  *    - Arduino.h
  *    - shared_state.h
+ *
+ * NOTES:
+ *    WHY A SPINLOCK AND NOT A MUTEX
+ *    Both cores touch this record and the critical sections are a struct
+ *    copy long. A FreeRTOS mutex would let the holder be preempted while
+ *    holding it, and a reader on the other core would then block on a task
+ *    that is not running. portMUX masks interrupts on the calling core for
+ *    the few microseconds the copy takes, which is the right trade at this
+ *    size -- and the reason every section below must stay short.
+ *
+ *    Never call a driver, print, or wait inside these functions.
  *
  * ============================================================================
  */
@@ -27,36 +38,51 @@
 /* The one and only instance. Never exposed; reach it via the accessors. */
 static system_state_t g_state;
 
-/* Spinlock guarding g_state. portMUX is the correct primitive here because
- * both cores touch the state and the critical sections are very short. */
+/* Spinlock guarding g_state. */
 static portMUX_TYPE g_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
 void shared_state_init(void) {
-    // TODO: zero g_state, set mode to ELEV_MODE_INIT, clear all fault bits
-    return;
+    /* Runs before any task exists, so no lock is needed or wanted here. */
+    memset(&g_state, 0, sizeof(g_state));
+    g_state.mode        = ELEV_MODE_INIT;
+    g_state.direction   = ELEV_DIR_NONE;
+    g_state.fault_flags = FAULT_NONE;
+    g_state.estop_active = false;
 }
 
 void shared_state_get(system_state_t *out) {
-    // TODO: enter the spinlock, copy g_state into *out, exit the spinlock
-    (void)out;
-    return;
+    if (out == NULL) return;
+    portENTER_CRITICAL(&g_state_mux);
+    *out = g_state;
+    portEXIT_CRITICAL(&g_state_mux);
 }
 
 void shared_state_set(const system_state_t *in) {
-    // TODO: enter the spinlock, copy *in into g_state, exit the spinlock
-    (void)in;
-    return;
+    if (in == NULL) return;
+    portENTER_CRITICAL(&g_state_mux);
+    /* Faults are latched, not published. controlTask holds a working copy
+     * that may be stale with respect to a fault another task raised in the
+     * meantime; OR-ing rather than assigning means a fault can never be
+     * lost to that race. */
+    uint32_t latched = g_state.fault_flags;
+    g_state = *in;
+    g_state.fault_flags |= latched;
+    portEXIT_CRITICAL(&g_state_mux);
 }
 
 void shared_state_raise_fault(uint32_t mask) {
-    // TODO: enter the spinlock, OR mask into g_state.fault_flags, exit
-    (void)mask;
-    return;
+    portENTER_CRITICAL(&g_state_mux);
+    g_state.fault_flags |= mask;
+    portEXIT_CRITICAL(&g_state_mux);
 }
 
 void shared_state_note_heartbeat(uint32_t seq, uint32_t now_ms) {
-    // TODO: enter the spinlock, store seq and now_ms, clear FAULT_LINK_TIMEOUT
-    (void)seq;
-    (void)now_ms;
-    return;
+    portENTER_CRITICAL(&g_state_mux);
+    g_state.link_seq          = seq;
+    g_state.last_heartbeat_ms = now_ms;
+    /* Clearing the timeout bit here is deliberate: the link is proven alive
+     * by this very frame. FAULT_FALL_DETECTED is NOT cleared -- a fall is
+     * latched until an operator clears it. */
+    g_state.fault_flags &= ~((uint32_t)FAULT_LINK_TIMEOUT);
+    portEXIT_CRITICAL(&g_state_mux);
 }

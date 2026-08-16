@@ -114,6 +114,34 @@ produces garbage field values with no error message anywhere.
 
 Bump `LINK_PROTO_VER` on any change, and reflash both boards.
 
+## Development workflow
+
+Modules are proven standalone first, then integrated. Not the other way
+round.
+
+1. **Prototype.** A module is developed as its own throwaway Arduino sketch,
+   outside this tree, exercising one peripheral only. Whatever shape gets it
+   working is fine at this stage: globals, magic numbers, `delay()`,
+   everything in `loop()`. Prototypes are not held to the rules below.
+2. **Prove it.** The prototype runs on the bench until it does the thing
+   reliably. The evidence gets recorded against its row in
+   `docs/vv_table.md`.
+3. **Hand over.** The working prototype is handed to Claude for integration
+   into the layered structure here: split across the driver header and its
+   `.cpp`, app concepts lifted out into the app layer, measured constants
+   moved into `board_config.h`, documentation blocks added.
+4. **Re-verify.** Integration can break a working module. The bench test is
+   repeated after integration; passing before does not count as passing
+   after.
+
+When handing a prototype over, include: which pins it actually used, which
+library and version if any, and which numbers in it were measured versus
+guessed. The last one matters most -- a measured constant moves into
+`board_config.h` with its provenance, a guessed one stays a `// TODO:`.
+
+Claude does not write module logic ahead of this. A stub waits for a proven
+prototype; it is not a placeholder for Claude to fill in on its own.
+
 ## Approval boundaries
 
 These are not suggestions.
