@@ -84,7 +84,7 @@ static void check(const char *name, int condition) {
  * ============================================================================
  */
 static void test_pid_reset_clears_state(void) {
-    pid_t c;
+    pid_ctl_t c;
     pid_init(&c, 0.0f, 1.0f, 0.0f, -100.0f, 100.0f);   /* integral only */
 
     /* Ten seconds of unit error accumulates ten error-seconds. */
@@ -108,7 +108,7 @@ static void test_pid_reset_clears_state(void) {
  * ============================================================================
  */
 static void test_pid_output_is_clamped(void) {
-    pid_t c;
+    pid_ctl_t c;
     pid_init(&c, 1000.0f, 0.0f, 0.0f, -5.0f, 5.0f);
 
     float hi = pid_update(&c, 1000.0f, 0.0f, 0.01f);
@@ -128,7 +128,7 @@ static void test_pid_output_is_clamped(void) {
  * ============================================================================
  */
 static void test_pid_zero_error_holds(void) {
-    pid_t c;
+    pid_ctl_t c;
     pid_init(&c, 5.0f, 2.0f, 0.5f, -100.0f, 100.0f);
     float out = pid_update(&c, 42.0f, 42.0f, 0.01f);
     check("pid_update returns zero at setpoint", nearly(out, 0.0f));

@@ -17,6 +17,7 @@
  * DEPENDENCIES:
  *    - Arduino.h
  *    - esp_timer.h: one-shot timeout timer
+ *    - soc/gpio_struct.h: direct register read inside the ISR
  *    - board_config.h: pin assignments and timing
  *    - hcsr04.h
  *
@@ -51,6 +52,7 @@
 
 #include <Arduino.h>
 #include <esp_timer.h>
+#include "soc/gpio_struct.h"
 #include "board_config.h"
 #include "hcsr04.h"
 

@@ -56,7 +56,7 @@
 static system_state_t s_local;
 
 /* The position controller. Gains come from board_config.h. */
-static pid_t s_pid;
+static pid_ctl_t s_pid;
 
 /* Commanded shaft angle, degrees, in encoder terms. */
 static float s_target_deg;

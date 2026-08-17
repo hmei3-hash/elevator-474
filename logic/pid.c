@@ -35,7 +35,7 @@
 
 #include "pid.h"
 
-void pid_init(pid_t *c, float kp, float ki, float kd, float out_min, float out_max) {
+void pid_init(pid_ctl_t *c, float kp, float ki, float kd, float out_min, float out_max) {
     if (c == 0) return;
 
     c->kp = kp;
@@ -55,7 +55,7 @@ void pid_init(pid_t *c, float kp, float ki, float kd, float out_min, float out_m
     pid_reset(c);
 }
 
-float pid_update(pid_t *c, float setpoint, float measured, float dt_s) {
+float pid_update(pid_ctl_t *c, float setpoint, float measured, float dt_s) {
     if (c == 0 || dt_s <= 0.0f) return 0.0f;
 
     float error = setpoint - measured;
@@ -82,7 +82,7 @@ float pid_update(pid_t *c, float setpoint, float measured, float dt_s) {
     return out;
 }
 
-void pid_reset(pid_t *c) {
+void pid_reset(pid_ctl_t *c) {
     if (c == 0) return;
     c->integrator = 0.0f;
     c->prev_error = 0.0f;

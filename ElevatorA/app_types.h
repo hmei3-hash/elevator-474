@@ -68,11 +68,11 @@ typedef enum {
 
 /**
  * Source of a floor request. Recorded so logTask can attribute requests.
+ * All requests originate inside the car: there are no hall-call buttons.
  */
 typedef enum {
-    REQ_SRC_BUTTON = 0,
-    REQ_SRC_IR,
-    REQ_SRC_RFID
+    REQ_SRC_CAR_BUTTON = 0,   // car-panel pushbutton
+    REQ_SRC_RFID              // request implied by an authorised card
 } req_source_t;
 
 /**
@@ -98,19 +98,18 @@ typedef enum {
  * Discriminator for input_event_t.
  */
 typedef enum {
-    INPUT_EVT_BUTTON_PRESS = 0,
-    INPUT_EVT_IR_COMMAND,
+    INPUT_EVT_CAR_BUTTON = 0,
     INPUT_EVT_RFID_CARD
 } input_evt_type_t;
 
 /**
- * Message posted by inputTask (Core 0, 200 Hz) and rfidTask (Core 0, ~10 Hz)
+ * Message posted by inputTask (Core 0, 200 Hz, car buttons) and rfidTask
+ * (Core 0, ~10 Hz)
  * onto the input queue. Consumed by controlTask (Core 1, 100 Hz).
  */
 typedef struct {
     input_evt_type_t type;
-    uint8_t          floor;        // valid when type == INPUT_EVT_BUTTON_PRESS
-    uint32_t         ir_code;      // valid when type == INPUT_EVT_IR_COMMAND
+    uint8_t          floor;        // valid when type == INPUT_EVT_CAR_BUTTON
     uint8_t          uid[10];      // valid when type == INPUT_EVT_RFID_CARD
     uint8_t          uid_len;      // number of valid bytes in uid
     uint32_t         timestamp_ms; // millis() at capture

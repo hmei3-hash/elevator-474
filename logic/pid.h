@@ -34,6 +34,11 @@
 
 /**
  * Controller gains and accumulated state. The caller owns the storage.
+ *
+ * NAMED pid_ctl_t, NOT pid_t. POSIX <sys/types.h> already defines pid_t as
+ * a process id, and the ESP32 toolchain pulls that header in through
+ * Arduino.h. The collision is a hard compile error the moment any
+ * translation unit includes both, which is every file on the target.
  */
 typedef struct {
     float kp;              /* proportional gain */
@@ -45,7 +50,7 @@ typedef struct {
 
     float out_min;         /* lower output clamp */
     float out_max;         /* upper output clamp */
-} pid_t;
+} pid_ctl_t;
 
 /**
  * Set the gains and output clamps and clear the accumulated state.
@@ -59,7 +64,7 @@ typedef struct {
  * @return void
  * Called from: control_init() on Board A, and from the host test harness.
  */
-void pid_init(pid_t *c, float kp, float ki, float kd, float out_min, float out_max);
+void pid_init(pid_ctl_t *c, float kp, float ki, float kd, float out_min, float out_max);
 
 /**
  * Run one controller update.
@@ -72,7 +77,7 @@ void pid_init(pid_t *c, float kp, float ki, float kd, float out_min, float out_m
  * @return control output, clamped to [out_min, out_max]
  * Called from: controlTask (Core 1, 100 Hz), and from the host test harness.
  */
-float pid_update(pid_t *c, float setpoint, float measured, float dt_s);
+float pid_update(pid_ctl_t *c, float setpoint, float measured, float dt_s);
 
 /**
  * Clear the integrator and derivative history without changing the gains.
@@ -82,4 +87,4 @@ float pid_update(pid_t *c, float setpoint, float measured, float dt_s);
  * @return void
  * Called from: control_emergency_stop(), and from the host test harness.
  */
-void pid_reset(pid_t *c);
+void pid_reset(pid_ctl_t *c);
