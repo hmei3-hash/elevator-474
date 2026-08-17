@@ -106,6 +106,11 @@
 #define HCSR04_MIN_MM          20
 #define HCSR04_MAX_MM          4000
 
+/* Consecutive missed echoes before the application calls it a fault. One
+ * miss is ordinary -- a bad angle, a soft target. A run of them means the
+ * sensor is not seeing the car at all. */
+#define HCSR04_FAULT_AFTER_MISSES  5
+
 /* --- Shared I2C bus. Two devices hang off it: the LCD and the encoder. --- */
 /* --- Because two different tasks reach this bus, access must be        --- */
 /* --- serialised with a mutex. See I2C_MUTEX_TIMEOUT_MS below.          --- */
@@ -145,6 +150,11 @@
 #define PIN_BTN_CAR_0          21   // INPUT_PULLUP
 #define PIN_BTN_CAR_1          47   // INPUT_PULLUP
 #define PIN_BTN_CAR_2          48   // INPUT_PULLUP
+
+/* Consecutive 200 Hz samples a button must read pressed before the press is
+ * accepted. At PERIOD_MS_INPUT this is the debounce interval in samples.
+ * TODO: set from the measured bounce duration of the actual switches. */
+#define BTN_DEBOUNCE_SAMPLES   4
 
 /* ========================================================================== */
 /*                        SECTION: CORE ASSIGNMENTS                           */
@@ -219,6 +229,13 @@
  * explicitly removes "sends report success but nothing arrives" from the
  * list of things that can go wrong. Verified with mac_print. */
 #define LINK_WIFI_CHANNEL      1
+
+/* How long Board A tolerates silence before stopping the car. This must
+ * span several missed heartbeats so ordinary packet loss does not stop the
+ * elevator, while staying far shorter than the time a stopped car matters.
+ * TODO: derive from Board B's heartbeat period and the measured loss rate;
+ *       VV-13 is the test that pins it down. */
+#define LINK_TIMEOUT_MS        0    // TODO: fill from bench
 
 /* ========================================================================== */
 /*                        SECTION: CONTROL LOOP                               */

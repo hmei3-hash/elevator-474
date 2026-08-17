@@ -37,6 +37,7 @@
  */
 
 #include <stdio.h>
+#include <math.h>
 #include "../pid.h"
 #include "../filter.h"
 
@@ -59,6 +60,10 @@ static int s_failed;
  *    void
  * ============================================================================
  */
+static int nearly(float a, float b) {
+    return fabsf(a - b) < 1e-4f;
+}
+
 static void check(const char *name, int condition) {
     s_run++;
     if (!condition) {
@@ -79,9 +84,19 @@ static void check(const char *name, int condition) {
  * ============================================================================
  */
 static void test_pid_reset_clears_state(void) {
-    /* TODO: build a controller, drive it to accumulate integrator state,
-     * reset it, and assert the integrator contribution is gone. */
-    check("pid_reset clears integrator", 0);
+    pid_t c;
+    pid_init(&c, 0.0f, 1.0f, 0.0f, -100.0f, 100.0f);   /* integral only */
+
+    /* Ten seconds of unit error accumulates ten error-seconds. */
+    for (int i = 0; i < 10; i++) pid_update(&c, 1.0f, 0.0f, 1.0f);
+    float before = pid_update(&c, 1.0f, 0.0f, 1.0f);
+
+    pid_reset(&c);
+    float after = pid_update(&c, 1.0f, 0.0f, 1.0f);
+
+    /* After a reset the first update should contribute one error-second,
+     * not eleven. */
+    check("pid_reset clears integrator", before > 5.0f && nearly(after, 1.0f));
 }
 
 /*
@@ -93,9 +108,14 @@ static void test_pid_reset_clears_state(void) {
  * ============================================================================
  */
 static void test_pid_output_is_clamped(void) {
-    /* TODO: apply an error large enough to saturate and assert the returned
-     * output equals the clamp, not a larger value. */
-    check("pid_update clamps output", 0);
+    pid_t c;
+    pid_init(&c, 1000.0f, 0.0f, 0.0f, -5.0f, 5.0f);
+
+    float hi = pid_update(&c, 1000.0f, 0.0f, 0.01f);
+    pid_reset(&c);
+    float lo = pid_update(&c, -1000.0f, 0.0f, 0.01f);
+
+    check("pid_update clamps output", nearly(hi, 5.0f) && nearly(lo, -5.0f));
 }
 
 /*
@@ -108,9 +128,10 @@ static void test_pid_output_is_clamped(void) {
  * ============================================================================
  */
 static void test_pid_zero_error_holds(void) {
-    /* TODO: assert a freshly initialised controller returns zero when
-     * setpoint equals measurement. */
-    check("pid_update returns zero at setpoint", 0);
+    pid_t c;
+    pid_init(&c, 5.0f, 2.0f, 0.5f, -100.0f, 100.0f);
+    float out = pid_update(&c, 42.0f, 42.0f, 0.01f);
+    check("pid_update returns zero at setpoint", nearly(out, 0.0f));
 }
 
 /*
@@ -122,9 +143,12 @@ static void test_pid_zero_error_holds(void) {
  * ============================================================================
  */
 static void test_moving_avg_rejects_bad_window(void) {
-    /* TODO: assert moving_avg_init returns negative for window 0 and for
-     * window FILTER_MAX_WINDOW + 1. */
-    check("moving_avg_init rejects bad window", 0);
+    moving_avg_t f;
+    int zero = moving_avg_init(&f, 0);
+    int over = moving_avg_init(&f, FILTER_MAX_WINDOW + 1);
+    int ok   = moving_avg_init(&f, FILTER_MAX_WINDOW);
+    check("moving_avg_init rejects bad window",
+          zero < 0 && over < 0 && ok == 0);
 }
 
 /*
@@ -136,9 +160,11 @@ static void test_moving_avg_rejects_bad_window(void) {
  * ============================================================================
  */
 static void test_moving_avg_constant_input(void) {
-    /* TODO: push one constant value more times than the window length and
-     * assert the average equals that constant. */
-    check("moving_avg converges on constant input", 0);
+    moving_avg_t f;
+    moving_avg_init(&f, 8);
+    float avg = 0.0f;
+    for (int i = 0; i < 40; i++) avg = moving_avg_push(&f, 3.5f);
+    check("moving_avg converges on constant input", nearly(avg, 3.5f));
 }
 
 /*
@@ -151,9 +177,16 @@ static void test_moving_avg_constant_input(void) {
  * ============================================================================
  */
 static void test_moving_avg_partial_window(void) {
-    /* TODO: push fewer samples than the window and assert the average is
-     * the mean of what was pushed. */
-    check("moving_avg handles a partial window", 0);
+    moving_avg_t f;
+    moving_avg_init(&f, 10);
+
+    /* Three samples into a window of ten: the divisor must be 3, not 10.
+     * Dividing by the window would report 1.8 instead of 6. */
+    moving_avg_push(&f, 4.0f);
+    moving_avg_push(&f, 6.0f);
+    float avg = moving_avg_push(&f, 8.0f);
+
+    check("moving_avg handles a partial window", nearly(avg, 6.0f));
 }
 
 /*
@@ -166,9 +199,15 @@ static void test_moving_avg_partial_window(void) {
  * ============================================================================
  */
 static void test_residual_tracks_peak(void) {
-    /* TODO: push a large negative residual followed by a small positive one
-     * and assert the peak still reflects the negative excursion. */
-    check("residual_push tracks peak magnitude", 0);
+    residual_t r;
+    residual_init(&r);
+
+    residual_push(&r, 0.0f, 12.0f);    /* residual -12 */
+    residual_push(&r, 3.0f, 0.0f);     /* residual  +3 */
+
+    /* The peak must be the magnitude of the negative excursion. Keeping a
+     * signed maximum would report 3 and hide the larger event. */
+    check("residual_push tracks peak magnitude", nearly(r.peak_residual, 12.0f));
 }
 
 /*
@@ -194,8 +233,6 @@ int main(void) {
     test_residual_tracks_peak();
 
     printf("=== %d run, %d failed ===\n", s_run, s_failed);
-    printf("NOTE: every case above is an empty stub. These results mean\n");
-    printf("      nothing until the TODO bodies are written.\n");
 
     return (s_failed == 0) ? 0 : 1;
 }

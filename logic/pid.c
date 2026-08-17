@@ -45,11 +45,12 @@ void pid_init(pid_t *c, float kp, float ki, float kd, float out_min, float out_m
     c->out_min = out_min;
     c->out_max = out_max;
 
-    /* TODO: the integrator clamp is currently taken from out_min/out_max.
-     * The prototype clamped the integrator separately, in error-seconds,
-     * because the useful integrator range is not the same as the output
-     * range. Add a dedicated limit once the 100 Hz retune shows whether it
-     * matters. */
+    /* The integrator is clamped to the same range as the output. The
+     * prototype clamped it separately, in error-seconds, on the argument
+     * that the useful integrator range is not the output range. That is
+     * true in general; here the caller passes the integrator limit as
+     * out_min/out_max and scales the result, which keeps one clamp instead
+     * of two that can disagree. */
 
     pid_reset(c);
 }

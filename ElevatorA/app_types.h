@@ -33,6 +33,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/** Largest floor count the fixed-size records below can hold. The actual
+ *  count in use is NUM_FLOORS in board_config.h; this only bounds storage,
+ *  so raising NUM_FLOORS beyond it is a compile-time error rather than a
+ *  silent overrun. */
+#define MAX_FLOORS  8
+
 /* ========================================================================== */
 /*                        SECTION: ENUMERATED VOCABULARY                      */
 /* ========================================================================== */
@@ -62,11 +68,11 @@ typedef enum {
 
 /**
  * Source of a floor request. Recorded so logTask can attribute requests.
- * All requests originate inside the car: there are no hall-call buttons.
  */
 typedef enum {
-    REQ_SRC_CAR_BUTTON = 0,   // car-panel pushbutton
-    REQ_SRC_RFID              // request implied by an authorised card
+    REQ_SRC_BUTTON = 0,
+    REQ_SRC_IR,
+    REQ_SRC_RFID
 } req_source_t;
 
 /**
@@ -92,17 +98,19 @@ typedef enum {
  * Discriminator for input_event_t.
  */
 typedef enum {
-    INPUT_EVT_CAR_BUTTON = 0,
+    INPUT_EVT_BUTTON_PRESS = 0,
+    INPUT_EVT_IR_COMMAND,
     INPUT_EVT_RFID_CARD
 } input_evt_type_t;
 
 /**
- * Message posted by inputTask (Core 0, 200 Hz, car buttons) and rfidTask
- * (Core 0, ~10 Hz) onto the input queue. Consumed by controlTask (Core 1, 100 Hz).
+ * Message posted by inputTask (Core 0, 200 Hz) and rfidTask (Core 0, ~10 Hz)
+ * onto the input queue. Consumed by controlTask (Core 1, 100 Hz).
  */
 typedef struct {
     input_evt_type_t type;
-    uint8_t          floor;        // valid when type == INPUT_EVT_CAR_BUTTON
+    uint8_t          floor;        // valid when type == INPUT_EVT_BUTTON_PRESS
+    uint32_t         ir_code;      // valid when type == INPUT_EVT_IR_COMMAND
     uint8_t          uid[10];      // valid when type == INPUT_EVT_RFID_CARD
     uint8_t          uid_len;      // number of valid bytes in uid
     uint32_t         timestamp_ms; // millis() at capture
@@ -124,9 +132,25 @@ typedef struct {
  * Message posted by any task onto the log queue.
  * Consumed by logTask (Core 0, 10 Hz), which owns Serial.
  */
+/**
+ * Identifies which task emitted a log line, so a trace can be read back
+ * per task. Values are stable: appending is safe, reordering is not,
+ * because captured logs outlive the build that produced them.
+ */
+typedef enum {
+    TASK_ID_CONTROL = 0,
+    TASK_ID_ULTRASONIC,
+    TASK_ID_LOAD,
+    TASK_ID_LINK,
+    TASK_ID_INPUT,
+    TASK_ID_RFID,
+    TASK_ID_LCD,
+    TASK_ID_LOG
+} task_id_t;
+
 typedef struct {
     uint32_t timestamp_ms;
-    uint8_t  source_task_id;      // TODO: define the task id enumeration
+    uint8_t  source_task_id;      // a task_id_t value
     uint32_t code;                // event or fault code
     int32_t  value;               // event-specific payload
 } log_msg_t;
@@ -148,7 +172,7 @@ typedef struct {
 
     uint8_t     current_floor;
     uint8_t     target_floor;
-    bool        request_pending[8];   // TODO: size from NUM_FLOORS once fixed
+    bool        request_pending[MAX_FLOORS];  // indexed by floor
 
     int32_t     position_mm;          // filtered car position, millimetres
     int32_t     position_raw_mm;      // last ultrasonic reading, millimetres

@@ -53,8 +53,8 @@ label, not by memory. Put a piece of tape on each one.
 
 | Board | Role | Who holds it |
 |---|---|---|
-| **B** | Fall detector: MPU6050 only, transmits over ESP-NOW | **Hongyi** (this is the board the IMU bring-up was done on) |
-| A | Elevator controller: stepper, encoder, ultrasonic, LCD, RFID, buttons | to be confirmed |
+| **B** | Fall detector: MPU6050 only, transmits over ESP-NOW | **Hongyi** — MAC ends `22:50`, the IMU bring-up board |
+| A | Elevator controller: stepper, encoder, ultrasonic, LCD, RFID, buttons | **Hongyi** — MAC ends `19:58` |
 
 Getting this backwards costs an evening: a swapped peer MAC makes
 `esp_now_send()` report SUCCESS while nothing ever arrives, and the first
@@ -64,8 +64,9 @@ things anyone suspects are the antenna, the channel, and the code.
 
 | Item | Value | Filled by |
 |---|---|---|
-| Board A STA MAC | `80:B5:4E:E3:22:50` | mac_print, 2026-08-15 -- **RECHECK: confirm this is the controller board, not the one now carrying the IMU** |
-| Board B STA MAC | | |
+| Board A STA MAC | `80:B5:4E:E3:19:58` | mac_print, 2026-08-17 — the controller board |
+| Board B STA MAC | `80:B5:4E:E3:22:50` | mac_print, 2026-08-15 — this is the board the IMU bring-up was done on |
 | LCD I2C address | | |
-| IMU I2C address | | |
+| IMU I2C address | `0x68` | imu_logger bus scan, 2026-08-17 |
 | WiFi channel | 1 | mac_print, 2026-08-15 |
+| IMU WHO_AM_I | `0x70` | imu_logger startup — MPU-6500 family, not a genuine 6050 |

@@ -184,7 +184,11 @@ bool mpu6050_init(void) {
      * acknowledges its address but reports the wrong identity is a
      * different part on the same bus, not a working sensor. */
     uint8_t who = 0;
-    if (!reg_read(REG_WHO_AM_I, &who)) {
+    if (!reg_read(REG_WHO_AM_I, &who) || who != MPU_WHO_AM_I_EXPECTED) {
+        /* Something acknowledged the address but is not the part the fall
+         * thresholds were characterised against. Refusing here beats
+         * silently deriving a safety decision from another sensor's scale
+         * factors. */
         s_addr = 0;
         return false;
     }
@@ -244,10 +248,5 @@ bool mpu6050_is_alive(void) {
     uint8_t who = 0;
     if (!reg_read(REG_WHO_AM_I, &who)) return false;
 
-    /* TODO: compare who against the identity value this specific module
-     *       reports. Clones return several different values, so the
-     *       expected constant must be read off the bench part rather than
-     *       taken from the datasheet. Record it in docs/pinmap.md.
-     *       Until then, a successful read is treated as alive. */
-    return true;
+    return (who == MPU_WHO_AM_I_EXPECTED);
 }
