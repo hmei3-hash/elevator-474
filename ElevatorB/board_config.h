@@ -128,9 +128,9 @@
 /*   Words, not bytes. Measure with uxTaskGetStackHighWaterMark().            */
 /* ========================================================================== */
 
-#define STACK_SAMPLE           0   // TODO: fill from high-water-mark measurement
-#define STACK_DETECT           0   // TODO: fill from high-water-mark measurement
-#define STACK_TX               0   // TODO: fill from high-water-mark measurement
+#define STACK_SAMPLE           4096   // TODO: shrink to measured peak x2
+#define STACK_DETECT           4096   // TODO: shrink to measured peak x2
+#define STACK_TX               4096   // TODO: shrink to measured peak x2
 
 /* ========================================================================== */
 /*                          SECTION: QUEUE DEPTHS                             */
@@ -185,6 +185,12 @@
 /* ========================================================================== */
 
 #define SERIAL_BAUD            115200
+
+/* Both boards must agree, and it must match Board A's LINK_WIFI_CHANNEL.
+ * Unassociated stations default to 1; setting it explicitly removes
+ * "esp_now_send reports SUCCESS but nothing arrives" from the list of
+ * things that can go wrong. Verified with mac_print. */
+#define LINK_WIFI_CHANNEL      1
 
 /** Hardware address of Board A. Fill from the mac_print bring-up sketch. */
 #define PEER_MAC_BYTES         {0x80, 0xB5, 0x4E, 0xE3, 0x19, 0x58}

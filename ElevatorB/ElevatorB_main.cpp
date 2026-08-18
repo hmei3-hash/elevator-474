@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * FILE: ElevatorB.ino
+ * FILE: ElevatorB_main.cpp
  *
  * PURPOSE:
  *    Board B entry point. Assembly only: initialise the sensor and the
@@ -14,6 +14,12 @@
  *
  * LAST MODIFIED:
  *    08/16/2026
+ *
+ * BUILD:
+ *    PlatformIO, environment boardB. Renamed from ElevatorB.ino because PlatformIO
+ *    compiles .cpp directly; the Arduino IDE's .ino preprocessing (which
+ *    auto-generates forward declarations) is not involved, so every
+ *    function here is defined before it is used.
  *
  * DEPENDENCIES:
  *    - Arduino.h, WiFi.h, esp_now.h, esp_wifi.h
@@ -235,8 +241,21 @@ void setup() {
     }
     fall_detect_init();
 
+    /* Station mode, never associated.
+     *
+     * WiFi.disconnect() used to be called here to guarantee that. On core
+     * 3.x it logs "STA not started! You must call begin first" -- the
+     * station is configured but not brought up until begin(), which we
+     * never call, so there is nothing to disconnect FROM. The call was
+     * defending against a condition that cannot arise: without begin() the
+     * radio never associates.
+     *
+     * persistent(false) replaces the part that was doing real work. It
+     * stops the core writing credentials to NVS, so a build that once
+     * joined an access point cannot silently auto-reconnect on a later
+     * boot and drag the radio onto a different channel. */
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false, true);
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(LINK_WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);

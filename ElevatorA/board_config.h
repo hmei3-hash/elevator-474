@@ -133,8 +133,15 @@
  * reporting a bus fault. Must be shorter than the period of the fastest
  * task that uses the bus, or a missed acquisition turns into a missed
  * deadline instead of a reported fault. */
-#define I2C_MUTEX_TIMEOUT_MS   0   // TODO: fill after measuring worst-case
-                                   //       transaction time on the bench
+#define I2C_MUTEX_TIMEOUT_MS   5   // PROVISIONAL.
+                                   // Must stay shorter than the period of the
+                                   // fastest task on the bus. controlTask runs
+                                   // at 10 ms, so 5 ms leaves a missed
+                                   // acquisition reported as a bus fault
+                                   // rather than turning into a missed
+                                   // deadline.
+                                   // TODO: confirm against the measured
+                                   //       worst-case transaction time.
 
 /* --- RC522 RFID over SPI --- */
 #define PIN_SPI_SCK            12   // FSPI CLK
@@ -168,6 +175,7 @@
 #define CORE_RFID              0   // rfidTask
 #define CORE_LCD               0   // lcdTask
 #define CORE_LOG               0   // logTask
+#define CORE_CMD               0   // cmdTask, bench facility
 
 /* ========================================================================== */
 /*                        SECTION: TASK PRIORITIES                            */
@@ -181,6 +189,7 @@
 #define PRIO_RFID              3
 #define PRIO_LCD               2
 #define PRIO_LOG               1
+#define PRIO_CMD               1   // a human typing is never urgent
 #define PRIO_LOAD              1
 
 /* ========================================================================== */
@@ -203,14 +212,16 @@
 /*   bench; do not guess.                                                     */
 /* ========================================================================== */
 
-#define STACK_CONTROL          0   // TODO: fill from high-water-mark measurement
-#define STACK_ULTRASONIC       0   // TODO: fill from high-water-mark measurement
-#define STACK_LOAD             0   // TODO: fill from high-water-mark measurement
-#define STACK_LINK             0   // TODO: fill from high-water-mark measurement
-#define STACK_INPUT            0   // TODO: fill from high-water-mark measurement
-#define STACK_RFID             0   // TODO: fill from high-water-mark measurement
-#define STACK_LCD              0   // TODO: fill from high-water-mark measurement
-#define STACK_LOG              0   // TODO: fill from high-water-mark measurement
+#define STACK_CONTROL          4096   // TODO: shrink to measured peak x2
+#define STACK_ULTRASONIC       4096   // TODO: shrink to measured peak x2
+#define STACK_LOAD             4096   // TODO: shrink to measured peak x2
+#define STACK_LINK             4096   // TODO: shrink to measured peak x2
+#define STACK_INPUT            4096   // TODO: shrink to measured peak x2
+#define STACK_RFID             4096   // TODO: shrink to measured peak x2
+#define STACK_LCD              4096   // TODO: shrink to measured peak x2
+#define STACK_LOG              4096   // TODO: shrink to measured peak x2
+#define STACK_CMD              4096   // TODO: shrink to measured peak x2
+                                      // sscanf and printf are the cost here
 
 /* ========================================================================== */
 /*                          SECTION: QUEUE DEPTHS                             */
@@ -235,7 +246,18 @@
  * elevator, while staying far shorter than the time a stopped car matters.
  * TODO: derive from Board B's heartbeat period and the measured loss rate;
  *       VV-13 is the test that pins it down. */
-#define LINK_TIMEOUT_MS        0    // TODO: fill from bench
+#define LINK_TIMEOUT_MS        150  // PROVISIONAL.
+                                    // Board B heartbeats every 20 ms, so this
+                                    // tolerates roughly seven consecutive
+                                    // losses before stopping the car. Long
+                                    // enough that ordinary packet loss is not
+                                    // a stoppage, far shorter than the time a
+                                    // stopped car matters.
+                                    // TODO: set from the measured five-minute
+                                    //       loss rate. VV-13 pins it down.
+                                    // A zero here would time out on the very
+                                    // first check and hold the car in
+                                    // permanent emergency stop.
 
 /* ========================================================================== */
 /*                        SECTION: CONTROL LOOP                               */
@@ -255,7 +277,12 @@
  * 500 iterations at 1 kHz, i.e. 0.5 s; the same wall-clock time is 50
  * iterations here, but confirm 0.5 s is still the right window once the
  * car has mass on it. */
-#define CTRL_STALL_TICKS       0   // TODO: fill from bench at 100 Hz
+#define CTRL_STALL_TICKS       50  // PROVISIONAL: 0.5 s at 100 Hz, matching
+                                   // the prototype's 500 iterations at 1 kHz.
+                                   // TODO: confirm once the car carries its
+                                   //       mass; a zero here latches a stall
+                                   //       fault on the first qualifying
+                                   //       iteration.
 
 /* Integrator clamp, in degree-seconds. Bench-verified. */
 #define CTRL_INTEGRAL_LIMIT    200.0f

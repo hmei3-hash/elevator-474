@@ -52,9 +52,6 @@
 #include "hcsr04.h"
 #include "../logic/pid.h"
 
-/* Local working copy, published through shared_state_set(). */
-static system_state_t s_local;
-
 /* The position controller. Gains come from board_config.h. */
 static pid_ctl_t s_pid;
 
@@ -111,9 +108,12 @@ static bool control_read_angle_deg(float *out) {
  *    int32_t - target position in millimetres
  *
  * CALLED FROM:
- *    control_step(), controlTask, Core 1.
+ *    control_step(), controlTask, Core 1. Not called yet -- it is wired in
+ *    once the three floor positions have been measured on the built shaft,
+ *    so it is marked unused to keep the build warning-clean until then.
  * ============================================================================
  */
+__attribute__((unused))
 static int32_t control_floor_to_position(uint8_t floor) {
     // TODO: the floor-to-millimetre mapping cannot be written until the
     //       shaft is built and each floor position is measured on the bench
@@ -240,4 +240,56 @@ void control_emergency_stop(uint32_t cause) {
 
     // TODO: enter ELEV_MODE_ESTOP in the published state once the mode
     //       transitions are written
+}
+
+/* ========================================================================== */
+/*                    SECTION: BENCH TUNING INTERFACE                         */
+/* ========================================================================== */
+
+void control_set_gains(float kp, float ki, float kd) {
+    /* Re-initialising rather than poking the gains in place also clears the
+     * integrator. Without that, error accumulated under the old gains is
+     * multiplied by the new ki the moment it changes, and the loop kicks --
+     * which reads as "the new gains are unstable" when they are not. */
+    pid_init(&s_pid, kp, ki, kd, -CTRL_INTEGRAL_LIMIT, CTRL_INTEGRAL_LIMIT);
+    s_rate_sps = 0.0f;
+}
+
+void control_get_gains(float *kp, float *ki, float *kd) {
+    if (kp) *kp = s_pid.kp;
+    if (ki) *ki = s_pid.ki;
+    if (kd) *kd = s_pid.kd;
+}
+
+void control_set_target_deg(float deg) {
+    s_target_deg = deg;
+    s_stalled    = false;
+    s_stall_ticks = 0;
+    pid_reset(&s_pid);
+}
+
+bool control_get_debug(float *target_deg, float *pos_deg, float *rate_sps) {
+    if (target_deg) *target_deg = s_target_deg;
+    if (rate_sps)   *rate_sps   = s_rate_sps;
+
+    float p;
+    bool ok = control_read_angle_deg(&p);
+    if (pos_deg) *pos_deg = ok ? p : 0.0f;
+    return ok;
+}
+
+bool control_zero_here(void) {
+    if (!as5600_zero()) return false;
+    s_target_deg  = 0.0f;
+    s_rate_sps    = 0.0f;
+    s_stalled     = false;
+    s_stall_ticks = 0;
+    pid_reset(&s_pid);
+    return true;
+}
+
+void control_clear_stall(void) {
+    s_stalled     = false;
+    s_stall_ticks = 0;
+    pid_reset(&s_pid);
 }

@@ -67,3 +67,30 @@ bool link_frame_is_valid(const link_frame_t *f);
  * Called from: logTask (Core 0, 10 Hz).
  */
 uint32_t link_get_dropped_count(void);
+
+/**
+ * Report how many frames were rejected in the receive callback for having
+ * the wrong length. A rising count means something else is transmitting on
+ * this channel, not that the peer is misbehaving.
+ *
+ * @return cumulative malformed-frame count since init
+ * Called from: logTask (Core 0, 10 Hz).
+ */
+uint32_t link_get_malformed_count(void);
+
+/**
+ * Read this board's own station MAC address.
+ *
+ * This is the address Board B must have in PEER_MAC_BYTES. Reading it from
+ * the running controller, rather than from a note taken during bring-up,
+ * removes the one link failure that produces no counter anywhere: a peer
+ * address that is well-formed but belongs to the wrong board. Board A sees
+ * nothing arrive, Board B sees every send succeed, and every diagnostic
+ * counter on both sides stays at zero.
+ *
+ * @param out  six-byte buffer to receive the address, must not be NULL
+ * @return true if the address was read
+ * Called from: setup(), Core 1, before the tasks exist. Valid only after
+ *              link_init() has brought the station interface up.
+ */
+bool link_get_own_mac(uint8_t out[6]);

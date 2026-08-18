@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * FILE: ElevatorA.ino
+ * FILE: ElevatorA_main.cpp
  *
  * PURPOSE:
  *    Board A entry point. Assembly only: initialise drivers, create queues
@@ -17,6 +17,12 @@
  * LAST MODIFIED:
  *    08/16/2026
  *
+ * BUILD:
+ *    PlatformIO, environment boardA. Renamed from ElevatorA.ino because PlatformIO
+ *    compiles .cpp directly; the Arduino IDE's .ino preprocessing (which
+ *    auto-generates forward declarations) is not involved, so every
+ *    function here is defined before it is used.
+ *
  * DEPENDENCIES:
  *    - Arduino.h
  *    - board_config.h, app_types.h
@@ -28,6 +34,12 @@
  *    Core 0 at priority 23, so controlTask must stay on Core 1 to keep its
  *    100 Hz period deterministic. Do not move tasks between cores without
  *    re-measuring jitter.
+ *
+ *    ARDUINO CORE VERSION
+ *    The hardware timer API changed incompatibly between arduino-esp32 2.x
+ *    and 3.x. Both spellings are kept behind ESP_ARDUINO_VERSION_MAJOR so
+ *    the same source builds under either, because the Arduino IDE and
+ *    PlatformIO on this project resolved to different cores.
  *
  *    THE CONTROL LOOP IS RELEASED BY A HARDWARE TIMER, NOT BY THE TICK.
  *    A hardware timer ISR gives a binary semaphore at 100 Hz and
@@ -80,6 +92,24 @@ static volatile uint32_t s_drop_log;
 extern void lcdTask(void *arg);
 extern void logTask(void *arg);
 extern void ui_note_access(bool granted);
+
+/* Defined in cmd.cpp. Bench facility: remove that file and this line and
+ * nothing else changes. */
+extern void cmdTask(void *arg);
+
+/* Log codes above the fault-bit range, so a log line's code field is
+ * unambiguous: below 0x100 it is a fault_code_t, above it is one of these. */
+#define LOG_CODE_LINK_FIRST      0x100   /* first accepted frame, value = seq */
+#define LOG_CODE_LINK_REJECTED   0x101   /* wrong version or unknown type     */
+#define LOG_CODE_LINK_DROPPED    0x102   /* RX queue was full                 */
+#define LOG_CODE_LINK_MALFORMED  0x103   /* wrong length, rejected in the ISR */
+
+/* How far the ranged distance must move before ultrasonicTask logs it again.
+ * A diagnostics choice, not a control constant: nothing reads it, so it can
+ * be changed freely. 5 mm sits above the sensor's observed 1-2 mm of
+ * standstill jitter (log boardA_20260818_142344: 41/42/43 mm at rest) and
+ * far below the smallest car movement worth seeing. */
+#define ULTRASONIC_LOG_DELTA_MM  5
 
 /*
  * ============================================================================
@@ -237,12 +267,27 @@ static void ultrasonicTask(void *arg) {
     hcsr04_reading_t r;
     uint32_t consecutive_bad = 0;
 
+    /* Last distance actually written to the log. UINT16_MAX means "nothing
+     * reported yet", so the first valid reading always appears. */
+    uint16_t last_reported_mm = UINT16_MAX;
+
     for (;;) {
         /* Collect before triggering: the result belongs to the ping started
          * one period ago. The driver is interrupt driven and never blocks. */
         if (hcsr04_collect(&r) && r.valid) {
             consecutive_bad = 0;
-            log_post(TASK_ID_ULTRASONIC, 0, (int32_t)r.distance_mm);
+            /* Report a CHANGE, not a sample. Logging all 16 readings per
+             * second produced ~30 lines/s of "the car has not moved", which
+             * is not evidence of anything -- and the flood overran the USB
+             * CDC transmit buffer, which drops bytes silently and spliced
+             * unrelated log lines together mid-number. A log that corrupts
+             * itself under load is worse than no log. */
+            if (last_reported_mm == UINT16_MAX ||
+                (uint16_t)abs((int32_t)r.distance_mm - (int32_t)last_reported_mm)
+                    >= ULTRASONIC_LOG_DELTA_MM) {
+                last_reported_mm = r.distance_mm;
+                log_post(TASK_ID_ULTRASONIC, 0, (int32_t)r.distance_mm);
+            }
         } else {
             consecutive_bad++;
             /* One missed echo is ordinary -- a bad angle, a soft target.
@@ -276,8 +321,9 @@ static void ultrasonicTask(void *arg) {
  */
 static void loadTask(void *arg) {
     (void)arg;
-    uint32_t candidate = 2;
-    uint32_t found     = 0;
+    uint32_t candidate   = 2;
+    uint32_t found       = 0;
+    uint32_t last_logged = 0xFFFFFFFF;
 
     for (;;) {
         bool prime = (candidate >= 2);
@@ -293,7 +339,19 @@ static void loadTask(void *arg) {
          * load is a real computation rather than a busy spin. */
         taskYIELD();
 
-        if ((found & 0x3FF) == 0) {
+        /* Report only when the count CROSSES a multiple, not while it sits
+         * on one. The obvious spelling -- (found & 0x3FF) == 0 -- is true on
+         * every iteration between two primes, because found does not change
+         * in between. That logged thousands of identical lines per second,
+         * swamped the log queue, and truncated the serial output. */
+         *
+         * The mask was 0x3FF, which reported every 1024 primes -- several
+         * lines per second, sharing the wire with the ultrasonic stream and
+         * helping overrun the CDC buffer. 0xFFFF reports every 65536, which
+         * is still often enough to prove the load task is progressing and
+         * rare enough to stay out of the way of real events. */
+        if (found != last_logged && (found & 0xFFFF) == 0) {
+            last_logged = found;
             log_post(TASK_ID_LOAD, 0, (int32_t)found);
         }
     }
@@ -332,9 +390,31 @@ static void linkTask(void *arg) {
     link_frame_t f;
     system_state_t st;
 
+    /* Diagnostics. "No heartbeat" has several causes that look identical
+     * from the outside: nothing arriving at all, frames arriving and being
+     * rejected for a version mismatch, or frames arriving faster than this
+     * task drains them. Counting each separately turns one symptom into
+     * three distinguishable faults. */
+    uint32_t accepted = 0;
+    uint32_t rejected = 0;
+    bool     seen_any = false;
+    uint32_t next_summary_ms = 0;
+
     for (;;) {
         while (link_receive(&f)) {
-            if (!link_frame_is_valid(&f)) continue;
+            if (!link_frame_is_valid(&f)) {
+                rejected++;
+                continue;
+            }
+            accepted++;
+
+            /* The first accepted frame is the moment the link proves it
+             * works. Say so once, loudly, rather than leaving it implicit
+             * in the absence of a fault. */
+            if (!seen_any) {
+                seen_any = true;
+                log_post(TASK_ID_LINK, LOG_CODE_LINK_FIRST, (int32_t)f.seq);
+            }
 
             shared_state_note_heartbeat(f.seq, millis());
 
@@ -344,11 +424,24 @@ static void linkTask(void *arg) {
             }
         }
 
+        uint32_t now = millis();
+
         shared_state_get(&st);
-        if ((millis() - st.last_heartbeat_ms) > LINK_TIMEOUT_MS) {
+        if ((now - st.last_heartbeat_ms) > LINK_TIMEOUT_MS) {
             control_emergency_stop(FAULT_LINK_TIMEOUT);
-            log_post(TASK_ID_LINK, FAULT_LINK_TIMEOUT,
-                     (int32_t)link_get_dropped_count());
+
+            /* Once a second, not every 20 ms. A fault that repeats at the
+             * task rate drowns out everything else on the wire, including
+             * whatever would explain it. */
+            if ((int32_t)(now - next_summary_ms) >= 0) {
+                next_summary_ms = now + 1000;
+                log_post(TASK_ID_LINK, FAULT_LINK_TIMEOUT, (int32_t)accepted);
+                log_post(TASK_ID_LINK, LOG_CODE_LINK_REJECTED, (int32_t)rejected);
+                log_post(TASK_ID_LINK, LOG_CODE_LINK_DROPPED,
+                         (int32_t)link_get_dropped_count());
+                log_post(TASK_ID_LINK, LOG_CODE_LINK_MALFORMED,
+                         (int32_t)link_get_malformed_count());
+            }
         }
 
         vTaskDelayUntil(&last, pdMS_TO_TICKS(PERIOD_MS_LINK));
@@ -491,15 +584,34 @@ void setup() {
 
     /* Drivers. A failure here latches a fault rather than halting: the
      * elevator can still run degraded without a card reader or a display,
-     * and refusing to boot would hide which one failed. */
-    if (!stepper_init())  shared_state_raise_fault(FAULT_STEPPER_STALL);
-    if (!hcsr04_init())   shared_state_raise_fault(FAULT_ULTRASONIC_LOST);
-    if (!rc522_init())    shared_state_raise_fault(FAULT_RFID_FAILURE);
-
+     * and refusing to boot would hide which one failed.
+     *
+     * Each result is also PRINTED. Latching a fault bit and saying nothing
+     * made a dead driver indistinguishable from a working one on the wire:
+     * the panel shows only the highest-priority fault, so a link timeout
+     * masks a failed display, and the log carries no init record at all.
+     * One line per driver at boot costs nothing and turns "the LCD is
+     * blank" from a guess into a reading. */
+    const bool ok_stepper = stepper_init();
+    const bool ok_hcsr04  = hcsr04_init();
+    const bool ok_rc522   = rc522_init();
     /* Both of these share the I2C bus; no task exists yet, so no mutex is
      * needed, but the order is kept deliberate. */
-    if (!lcd_ui_init())   shared_state_raise_fault(FAULT_LCD_FAILURE);
-    if (!as5600_init())   shared_state_raise_fault(FAULT_POSITION_LIMIT);
+    const bool ok_lcd     = lcd_ui_init();
+    const bool ok_as5600  = as5600_init();
+
+    if (!ok_stepper) shared_state_raise_fault(FAULT_STEPPER_STALL);
+    if (!ok_hcsr04)  shared_state_raise_fault(FAULT_ULTRASONIC_LOST);
+    if (!ok_rc522)   shared_state_raise_fault(FAULT_RFID_FAILURE);
+    if (!ok_lcd)     shared_state_raise_fault(FAULT_LCD_FAILURE);
+    if (!ok_as5600)  shared_state_raise_fault(FAULT_POSITION_LIMIT);
+
+    Serial.println(F("--- driver init ---"));
+    Serial.printf("  stepper (TMC2209)   %s\n", ok_stepper ? "OK" : "FAIL");
+    Serial.printf("  ultrasonic (HC-SR04)%s\n", ok_hcsr04  ? " OK" : " FAIL");
+    Serial.printf("  rfid (RC522, SPI)   %s\n", ok_rc522   ? "OK" : "FAIL");
+    Serial.printf("  lcd (I2C)           %s\n", ok_lcd     ? "OK" : "FAIL");
+    Serial.printf("  encoder (AS5600,I2C)%s\n", ok_as5600  ? " OK" : " FAIL");
 
     if (!link_init()) {
         Serial.println(F("FATAL: ESP-NOW would not start. Halting."));
@@ -507,6 +619,22 @@ void setup() {
          * the safety case does not hold. Refusing to run is the safe
          * failure. */
         for (;;) delay(1000);
+    }
+
+    /* The address Board B must be transmitting to. Printing it makes the one
+     * link failure that leaves every counter at zero -- a peer MAC pointing
+     * at the wrong board -- visible in two seconds instead of an afternoon.
+     * Compare against PEER_MAC_BYTES in ElevatorB/board_config.h. */
+    uint8_t own_mac[6];
+    if (link_get_own_mac(own_mac)) {
+        Serial.printf("--- link ---\n  Board A STA MAC     "
+                      "%02X:%02X:%02X:%02X:%02X:%02X\n",
+                      own_mac[0], own_mac[1], own_mac[2],
+                      own_mac[3], own_mac[4], own_mac[5]);
+        Serial.printf("  wifi channel        %d\n", LINK_WIFI_CHANNEL);
+        Serial.println(F("  ^ this must equal PEER_MAC_BYTES on Board B"));
+    } else {
+        Serial.println(F("--- link ---\n  could not read own MAC"));
     }
 
     g_q_input = xQueueCreate(QDEPTH_INPUT_EVENT, sizeof(input_event_t));
@@ -538,12 +666,26 @@ void setup() {
                             PRIO_LCD,   NULL, CORE_LCD);
     xTaskCreatePinnedToCore(logTask,   "log",   STACK_LOG,   NULL,
                             PRIO_LOG,   NULL, CORE_LOG);
+    xTaskCreatePinnedToCore(cmdTask,   "cmd",   STACK_CMD,   NULL,
+                            PRIO_CMD,   NULL, CORE_CMD);
 
     /* The control timer starts LAST, so the first tick cannot arrive before
      * the task that consumes it exists. */
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    /* Core 3.x: timerBegin takes the tick frequency directly. */
     s_control_timer = timerBegin(1000000);              /* 1 MHz time base */
     timerAttachInterrupt(s_control_timer, &onControlTimer);
     timerAlarm(s_control_timer, PERIOD_MS_CONTROL * 1000, true, 0);
+#else
+    /* Core 2.x: timer index and a prescaler off the 80 MHz APB clock.
+     * 80 MHz / 80 = 1 MHz, the same time base. Timer 0 here, timer 1 in
+     * stepper.cpp -- on 2.x the indices are ours to allocate and must not
+     * collide. */
+    s_control_timer = timerBegin(0, 80, true);
+    timerAttachInterrupt(s_control_timer, &onControlTimer, true);
+    timerAlarmWrite(s_control_timer, PERIOD_MS_CONTROL * 1000, true);
+    timerAlarmEnable(s_control_timer);
+#endif
 
     Serial.println(F("Board A running."));
 }

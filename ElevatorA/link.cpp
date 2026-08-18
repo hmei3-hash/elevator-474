@@ -65,7 +65,10 @@ static volatile uint32_t s_malformed;
  *    returns. Nothing else may happen here.
  *
  * PARAMETERS:
- *    info (const esp_now_recv_info_t*) - sender metadata, unused
+ *    info / mac - sender metadata, unused. ESP-NOW changed this parameter
+ *                 from a bare MAC pointer to a struct between arduino-esp32
+ *                 2.x and 3.x, so both signatures are kept behind
+ *                 ESP_ARDUINO_VERSION_MAJOR.
  *    data (const uint8_t*) - received bytes
  *    len (int) - number of received bytes
  *
@@ -76,9 +79,15 @@ static volatile uint32_t s_malformed;
  *    WiFi task, Core 0, priority 23. NOT an application task.
  * ============================================================================
  */
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
 static void link_rx_callback(const esp_now_recv_info_t *info,
                              const uint8_t *data, int len) {
     (void)info;
+#else
+static void link_rx_callback(const uint8_t *mac,
+                             const uint8_t *data, int len) {
+    (void)mac;
+#endif
 
     /* A frame of the wrong size cannot be our protocol. Rejecting it here
      * costs one comparison and keeps malformed bytes out of the queue
@@ -93,13 +102,14 @@ static void link_rx_callback(const esp_now_recv_info_t *info,
 
     /* Zero timeout: this context must never block. A full queue means the
      * frame is dropped and counted, which is the correct behaviour for a
-     * heartbeat -- the next one is 20 ms away. */
-    BaseType_t woken = pdFALSE;
-    if (xQueueSendFromISR(s_rx_queue, &f, &woken) != pdTRUE) {
+     * heartbeat -- the next one is 20 ms away.
+     *
+     * xQueueSend, not xQueueSendFromISR. This callback runs in the WiFi
+     * TASK, not in an interrupt: it is high priority, but it is still a
+     * task. The FromISR variants assume interrupt context, and
+     * portYIELD_FROM_ISR() from a task is not something to rely on. */
+    if (xQueueSend(s_rx_queue, &f, 0) != pdTRUE) {
         s_dropped++;
-    }
-    if (woken == pdTRUE) {
-        portYIELD_FROM_ISR();
     }
 }
 
@@ -116,8 +126,21 @@ bool link_init(void) {
 
     /* Station mode with no association. ESP-NOW needs the interface up; it
      * does not need, and must not have, an access point connection. */
+    /* Station mode, never associated.
+     *
+     * WiFi.disconnect() used to be called here to guarantee that. On core
+     * 3.x it logs "STA not started! You must call begin first" -- the
+     * station is configured but not brought up until begin(), which we
+     * never call, so there is nothing to disconnect FROM. The call was
+     * defending against a condition that cannot arise: without begin() the
+     * radio never associates.
+     *
+     * persistent(false) replaces the part that was doing real work. It
+     * stops the core writing credentials to NVS, so a build that once
+     * joined an access point cannot silently auto-reconnect on a later
+     * boot and drag the radio onto a different channel. */
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false, true);
 
     /* Both boards must sit on the same channel. Unassociated stations
      * default to channel 1, but setting it explicitly turns a silent
@@ -157,4 +180,15 @@ bool link_frame_is_valid(const link_frame_t *f) {
 
 uint32_t link_get_dropped_count(void) {
     return s_dropped;
+}
+
+uint32_t link_get_malformed_count(void) {
+    return s_malformed;
+}
+
+bool link_get_own_mac(uint8_t out[6]) {
+    if (out == NULL) return false;
+    /* WIFI_IF_STA, not the soft-AP interface: the station address is the one
+     * ESP-NOW delivers to, and the two differ by one in the last byte. */
+    return (esp_wifi_get_mac(WIFI_IF_STA, out) == ESP_OK);
 }

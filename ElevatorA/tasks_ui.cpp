@@ -51,6 +51,42 @@ extern SemaphoreHandle_t g_i2c_mutex;
 /* Composition buffers, one per row. File-local by design. */
 static char s_line[LCD_ROWS][LCD_COLS + 1];
 
+/* ========================================================================== */
+/*                     SECTION: LOG OUTPUT CONTROL                            */
+/* ========================================================================== */
+
+/*
+ * Two independent problems are solved here, and they are separate on purpose.
+ *
+ * MUTE is a request: the bench operator wants the wire to themselves. The
+ * telemetry stream in cmd.cpp is a 100 Hz CSV that gets pasted into a
+ * spreadsheet and plotted, and log lines interleaved into it corrupt exactly
+ * the artifact the tuning session exists to produce.
+ *
+ * THE RATE CAP is a guarantee: no source, present or future, can flood the
+ * port. A flood cannot be prevented at the source without knowing in advance
+ * which source will flood, so it is bounded at the single point every line
+ * passes through instead.
+ *
+ * Neither one is allowed to lose information silently. Suppressed lines are
+ * counted and the count is reported, because "12000 lines were dropped" and
+ * "nothing happened" must never look the same on the wire.
+ */
+
+/* Defined here, declared extern in cmd.cpp. Written by cmdTask (Core 0),
+ * read by logTask (Core 0). Both are on the same core and the value is a
+ * single aligned word, so no lock is needed. */
+volatile bool g_log_muted = false;
+
+/* Ceiling on log lines emitted per second. At 115200 baud the wire carries
+ * roughly 1150 characters per second above which output backs up; a log line
+ * is about 25 characters, so 40 lines/s uses well under half the link and
+ * leaves headroom for the telemetry stream and command replies. */
+#define LOG_MAX_LINES_PER_SEC   40
+
+/* Lines dropped by mute or by the rate cap since the last report. */
+static uint32_t s_log_suppressed;
+
 /* Access result most recently decided by the application, for row 1. */
 static bool s_access_shown;
 static uint32_t s_access_until_ms;
@@ -290,10 +326,41 @@ void logTask(void *arg) {
     TickType_t last = xTaskGetTickCount();
     log_msg_t m;
 
+    /* Start of the current one-second accounting window, and how many lines
+     * have been emitted inside it. */
+    uint32_t window_start_ms = millis();
+    uint32_t emitted_in_window = 0;
+
     for (;;) {
-        /* Drain fully. Draining one per tick would let a burst outlive the
-         * event that caused it and arrive out of context. */
+        uint32_t now = millis();
+
+        /* Roll the window. Reporting the suppressed count here, rather than
+         * when a line is dropped, keeps the report itself from becoming the
+         * flood it is describing. */
+        if ((uint32_t)(now - window_start_ms) >= 1000u) {
+            window_start_ms   = now;
+            emitted_in_window = 0;
+
+            if (s_log_suppressed > 0 && !g_log_muted) {
+                Serial.printf("# %lu log lines suppressed\n",
+                              (unsigned long)s_log_suppressed);
+                s_log_suppressed = 0;
+            }
+        }
+
+        /* Drain fully, ALWAYS -- including while muted. Draining one per tick
+         * would let a burst outlive the event that caused it and arrive out
+         * of context. Not draining while muted would be worse still: the
+         * queue would fill, log_post would start dropping at the producers,
+         * and the drop counters would blame the wrong thing. Mute suppresses
+         * printing, never collection. */
         while (xQueueReceive(g_q_log, &m, 0) == pdTRUE) {
+            if (g_log_muted || emitted_in_window >= LOG_MAX_LINES_PER_SEC) {
+                s_log_suppressed++;
+                continue;
+            }
+            emitted_in_window++;
+
             /* Integer formatting only. %f pulls in the float formatter,
              * which costs far more stack than the integer path -- and this
              * task's stack is sized from measurements of what it actually

@@ -19,6 +19,14 @@
  * DEPENDENCIES:
  *    - stdint.h: fixed-width integer types
  *
+ *    LINKAGE
+ *    The declarations below are wrapped in extern "C". This file is C, but
+ *    every translation unit on the target that includes it is C++ (Arduino
+ *    compiles .cpp and .ino as C++). Without the wrapper the caller emits a
+ *    mangled C++ symbol while the definition is a plain C symbol, and the
+ *    build fails at link time with "undefined reference" to a function that
+ *    plainly exists.
+ *
  * NOTES:
  *    Host-testable. This file must have ZERO platform and ZERO framework
  *    dependencies so it compiles and unit-tests with plain gcc.
@@ -31,6 +39,11 @@
 #pragma once
 
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /** Largest window this implementation supports, in samples. */
 #define FILTER_MAX_WINDOW  32
@@ -103,3 +116,7 @@ void residual_init(residual_t *r);
  * Called from: controlTask (Core 1, 100 Hz), and from the host test harness.
  */
 float residual_push(residual_t *r, float raw, float filtered);
+
+#ifdef __cplusplus
+}   /* extern "C" */
+#endif

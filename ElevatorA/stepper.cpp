@@ -27,7 +27,8 @@
  *    - stepper.h
  *
  * NOTES:
- *    Requires arduino-esp32 core 3.x for the timerBegin/timerAlarm API.
+ *    The hardware timer API changed incompatibly between arduino-esp32 2.x
+ *    and 3.x; both are supported behind ESP_ARDUINO_VERSION_MAJOR.
  *
  *    WHY A PHASE ACCUMULATOR
  *    A fixed-rate ISR adds a 32-bit increment to a phase register and emits
@@ -149,10 +150,20 @@ bool stepper_init(void) {
         return false;
     }
 
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
     s_timer = timerBegin(STEP_TIMER_HZ);
     if (s_timer == nullptr) return false;
     timerAttachInterrupt(s_timer, &onStepTimer);
     timerAlarm(s_timer, 1, true, 0);
+#else
+    /* Core 2.x: prescale the 80 MHz APB clock down to STEP_TIMER_HZ and
+     * fire on every tick. Timer 1; timer 0 is the control loop. */
+    s_timer = timerBegin(1, (uint16_t)(80000000UL / STEP_TIMER_HZ), true);
+    if (s_timer == nullptr) return false;
+    timerAttachInterrupt(s_timer, &onStepTimer, true);
+    timerAlarmWrite(s_timer, 1, true);
+    timerAlarmEnable(s_timer);
+#endif
 
     digitalWrite(PIN_STEPPER_EN, LOW);           /* energise */
     s_ready = true;

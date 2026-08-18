@@ -100,6 +100,16 @@ typedef struct __attribute__((packed)) {
     uint8_t  payload[LINK_PAYLOAD_BYTES];  // type-specific, zero when unused
 } link_frame_t;
 
+/* Compile-time assertion, spelled for whichever language is compiling this.
+ * _Static_assert is C11; C++ spells it static_assert. This header is
+ * included from .cpp on both boards and from C on the host, so it must
+ * work in both. */
+#if defined(__cplusplus)
+  #define LINK_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+  #define LINK_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
 /** Compile-time guard: the layout above must not have grown padding. */
-_Static_assert(sizeof(link_frame_t) == 6 + LINK_PAYLOAD_BYTES,
-               "link_frame_t has unexpected padding; check the packed attribute");
+LINK_STATIC_ASSERT(sizeof(link_frame_t) == 6 + LINK_PAYLOAD_BYTES,
+                   "link_frame_t has unexpected padding; check packed");

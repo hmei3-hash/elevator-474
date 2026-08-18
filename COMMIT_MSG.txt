@@ -1,0 +1,51 @@
+Migrate to PlatformIO; add bench command shell and bring-up diagnostics
+
+Build
+- Add platformio.ini with boardA/boardB environments sharing logic/.
+  The Arduino IDE compiled only the sketch folder, so logic/pid.c was
+  never built and control.cpp failed at link on a function that plainly
+  existed. build_src_filter fixes that without duplicating the source.
+- Rename ElevatorA.ino / ElevatorB.ino to *_main.cpp. PlatformIO compiles
+  .cpp directly and does not generate the forward declarations the .ino
+  preprocessor supplied, so every function is now defined before use.
+
+Bench command shell (cmd.cpp)
+- Serial interface for tuning: gains, target angle, zero, stop, stall
+  clear, status, telemetry. Without it each gain attempt is a full
+  rebuild-and-flash cycle.
+
+Bring-up diagnostics
+- setup() now prints the result of all five driver inits. Latching a
+  fault bit and saying nothing made a dead driver indistinguishable from
+  a working one: the panel shows only the highest-priority fault, so a
+  link timeout masked a failed display and the log carried no init
+  record at all.
+- Print Board A's own STA MAC at boot. A peer MAC pointing at the wrong
+  board is the one link failure that leaves every counter at zero -- the
+  sender reports SUCCESS on every frame and the receiver's callback
+  never runs.
+
+Serial output integrity
+- Cap log emission at 40 lines/s and report the suppressed count. The
+  ultrasonic stream at 16 Hz plus the load counter overran the USB CDC
+  transmit buffer, which drops bytes silently; unrelated log lines were
+  spliced together mid-number. A log that corrupts itself under load is
+  worse than no log, and this output is V&V evidence.
+- Log ultrasonic readings on change rather than per sample, and report
+  the load counter every 65536 rather than every 1024.
+- Add a log mute, taken automatically while telemetry streams. cmd.cpp
+  and logTask both write Serial with no arbitration between them, so log
+  lines interleaved into the tuning CSV corrupted the one artifact the
+  tuning run exists to produce.
+- Raise telemetry from 10 Hz to 100 Hz, matching the control rate, and
+  raise cmdTask's period to match while streaming. A step response that
+  settles in 200 ms left two samples at 10 Hz, from which neither
+  overshoot nor settling time can be read.
+
+Verified: ElevatorA/link_protocol.h and ElevatorB/link_protocol.h are
+byte-identical (VV-06).
+
+Not verified: no hardware test in this commit has been granted PASS.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UmpA5GM7EDAXHqJkf5WGSj

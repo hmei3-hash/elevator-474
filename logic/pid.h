@@ -19,6 +19,14 @@
  * DEPENDENCIES:
  *    - stdint.h: fixed-width integer types
  *
+ *    LINKAGE
+ *    The declarations below are wrapped in extern "C". This file is C, but
+ *    every translation unit on the target that includes it is C++ (Arduino
+ *    compiles .cpp and .ino as C++). Without the wrapper the caller emits a
+ *    mangled C++ symbol while the definition is a plain C symbol, and the
+ *    build fails at link time with "undefined reference" to a function that
+ *    plainly exists.
+ *
  * NOTES:
  *    Host-testable. This file must have ZERO platform and ZERO framework
  *    dependencies so it compiles and unit-tests with plain gcc.
@@ -31,6 +39,11 @@
 #pragma once
 
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 /**
  * Controller gains and accumulated state. The caller owns the storage.
@@ -88,3 +101,7 @@ float pid_update(pid_ctl_t *c, float setpoint, float measured, float dt_s);
  * Called from: control_emergency_stop(), and from the host test harness.
  */
 void pid_reset(pid_ctl_t *c);
+
+#ifdef __cplusplus
+}   /* extern "C" */
+#endif
