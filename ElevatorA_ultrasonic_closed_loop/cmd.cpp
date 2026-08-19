@@ -16,10 +16,7 @@ static bool s_mute_before_stream;
 
 static void cmd_print_status(void) {
     float kp, ki, kd, tgt, pos, rate;
-    float min_mm, max_mm;
-
     control_get_gains(&kp, &ki, &kd);
-    control_get_limits(&min_mm, &max_mm);
     bool ok = control_get_debug(&tgt, &pos, &rate);
 
     system_state_t st;
@@ -27,7 +24,6 @@ static void cmd_print_status(void) {
 
     Serial.println(F("--- status ---"));
     Serial.printf("  gains       kp %.3f  ki %.3f  kd %.4f\n", kp, ki, kd);
-    Serial.printf("  limits      %.1f .. %.1f mm\n", min_mm, max_mm);
     Serial.printf("  target      %.1f mm\n", tgt);
     Serial.printf("  position    %.1f mm %s\n", pos, ok ? "" : "(NO ULTRASONIC SAMPLE)");
     Serial.printf("  error       %.1f mm\n", tgt - pos);
@@ -67,14 +63,8 @@ static void cmd_execute(char *line) {
 
     case 'g':
         if (sscanf(args, "%f", &a) == 1) {
-            float tgt, pos, rate;
             control_set_target_mm(a);
-            control_get_debug(&tgt, &pos, &rate);
-            Serial.printf("-> target %.1f mm", tgt);
-            if (fabsf(tgt - a) > 0.01f) {
-                Serial.printf("  (requested %.1f, clamped to limits)", a);
-            }
-            Serial.println();
+            Serial.printf("-> target %.1f mm\n", a);
         } else {
             Serial.println(F("!! usage: g <mm>"));
         }
@@ -84,38 +74,12 @@ static void cmd_execute(char *line) {
         if (sscanf(args, "%f", &a) == 1) {
             float tgt, pos, rate;
             control_get_debug(&tgt, &pos, &rate);
-            const float requested = tgt + a;
-
-            control_set_target_mm(requested);
-            control_get_debug(&tgt, &pos, &rate);
-
-            Serial.printf("-> target %.1f mm", tgt);
-            if (fabsf(tgt - requested) > 0.01f) {
-                Serial.printf("  (requested %.1f, clamped to limits)",
-                              requested);
-            }
-            Serial.println();
+            (void)pos;
+            (void)rate;
+            control_set_target_mm(tgt + a);
+            Serial.printf("-> target %.1f mm\n", tgt + a);
         } else {
             Serial.println(F("!! usage: r <delta_mm>"));
-        }
-        break;
-
-
-    case 'l':
-        if (sscanf(args, "%f %f", &a, &b) == 2) {
-            if (control_set_limits(a, b)) {
-                float lo, hi;
-                control_get_limits(&lo, &hi);
-                Serial.printf("-> height limits %.1f .. %.1f mm\n", lo, hi);
-            } else {
-                Serial.println(F("!! invalid limits"));
-                Serial.println(F("!! require sensor_min <= min < max <= sensor_max"));
-            }
-        } else {
-            float lo, hi;
-            control_get_limits(&lo, &hi);
-            Serial.printf("   height limits %.1f .. %.1f mm\n", lo, hi);
-            Serial.println(F("   usage: l <min_mm> <max_mm>"));
         }
         break;
 
@@ -158,18 +122,7 @@ static void cmd_execute(char *line) {
         break;
 
     default:
-        Serial.println(F("? commands:"));
-        Serial.println(F("  p <kp> <ki> <kd>   set PID gains"));
-        Serial.println(F("  k                  show PID gains"));
-        Serial.println(F("  g <mm>             set absolute target"));
-        Serial.println(F("  r <delta_mm>       relative target move"));
-        Serial.println(F("  l <min> <max>      set height limits"));
-        Serial.println(F("  l                  show height limits"));
-        Serial.println(F("  s                  hold current position"));
-        Serial.println(F("  c                  clear internal stall latch"));
-        Serial.println(F("  d                  toggle 20 Hz PID telemetry"));
-        Serial.println(F("  m                  mute/unmute normal log"));
-        Serial.println(F("  ?                  status/help"));
+        Serial.println(F("? p<kp ki kd>  k  g<mm>  r<delta_mm>  s  c  d  m  ?"));
         break;
     }
 }

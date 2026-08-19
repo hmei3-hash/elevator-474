@@ -52,7 +52,7 @@ QueueHandle_t g_q_sample;
 
 /* Monotonic frame counter placed in link_frame_t.seq. */
 static uint32_t s_tx_seq;
-
+#define PEER_MAC_BYTES {0x80, 0xB5, 0x4E, 0xE3, 0x22, 0x50}
 /* Board A's hardware address. */
 static const uint8_t s_peer_mac[6] = PEER_MAC_BYTES;
 

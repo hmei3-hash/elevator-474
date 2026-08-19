@@ -15,23 +15,18 @@ void control_emergency_stop(uint32_t cause);
  */
 void control_update_ultrasonic(uint32_t raw_mm, uint32_t timestamp_ms);
 
-/* Live PID tuning from Serial. */
+/* Bench tuning / diagnostics. */
 void control_set_gains(float kp, float ki, float kd);
 void control_get_gains(float *kp, float *ki, float *kd);
 
-/* Runtime height envelope.
- * Defaults come from CTRL_HEIGHT_MIN_MM / CTRL_HEIGHT_MAX_MM.
- * Returns false if the requested limits are invalid.
- */
-bool control_set_limits(float min_mm, float max_mm);
-void control_get_limits(float *min_mm, float *max_mm);
-
-/* Target commands are always clamped to the active height envelope. */
 void control_set_target_mm(float mm);
 bool control_get_debug(float *target_mm, float *pos_mm, float *rate_sps);
 
 /* Hold the current ultrasonic position. */
 bool control_hold_here(void);
 
-/* Clears the controller's internal stall latch. */
+/* Clears the controller's internal stall latch.
+ * Note: the shared FAULT_STEPPER_STALL bit remains latched by the existing
+ * shared-state design; a boot-time TMC2209 init failure still requires fixing.
+ */
 void control_clear_stall(void);

@@ -21,10 +21,6 @@ static bool     s_target_valid;
 static float    s_rate_sps;
 static bool     s_stalled;
 
-/* Runtime height envelope. Serial may change these while running. */
-static float    s_limit_min_mm;
-static float    s_limit_max_mm;
-
 /* Latest ultrasonic sample. Written by ultrasonicTask, copied by controlTask. */
 static portMUX_TYPE s_ultra_mux = portMUX_INITIALIZER_UNLOCKED;
 static bool     s_have_sample;
@@ -49,13 +45,8 @@ static const float s_floor_mm[NUM_FLOORS] = {
 
 static bool floor_configured(uint8_t floor) {
     if (floor >= NUM_FLOORS) return false;
-
-    const float mm = s_floor_mm[floor];
-
-    return mm >= (float)HCSR04_MIN_MM &&
-           mm <= (float)HCSR04_MAX_MM &&
-           mm >= s_limit_min_mm &&
-           mm <= s_limit_max_mm;
+    return s_floor_mm[floor] >= (float)HCSR04_MIN_MM &&
+           s_floor_mm[floor] <= (float)HCSR04_MAX_MM;
 }
 
 bool control_init(void) {
@@ -63,9 +54,6 @@ bool control_init(void) {
     s_target_valid       = false;
     s_rate_sps           = 0.0f;
     s_stalled            = false;
-
-    s_limit_min_mm       = CTRL_HEIGHT_MIN_MM;
-    s_limit_max_mm       = CTRL_HEIGHT_MAX_MM;
 
     s_have_sample        = false;
     s_raw_mm             = 0;
@@ -265,26 +253,6 @@ void control_step(uint32_t dt_ms) {
     if (desired_sps - s_rate_sps < -max_delta)
         desired_sps = s_rate_sps - max_delta;
 
-    /*
-     * Hard travel-envelope protection.
-     *
-     * CTRL_ULTRA_DIRECTION_SIGN maps step-rate sign to the direction of
-     * increasing ultrasonic distance.  If the car is already at/beyond a
-     * boundary, block only motion that would push farther outside.  Motion
-     * back toward the legal region is still allowed.
-     */
-    const float sensor_direction = desired_sps * CTRL_ULTRA_DIRECTION_SIGN;
-
-    if (pos <= s_limit_min_mm && sensor_direction < 0.0f) {
-        desired_sps = 0.0f;
-        pid_reset(&s_pid);
-    }
-
-    if (pos >= s_limit_max_mm && sensor_direction > 0.0f) {
-        desired_sps = 0.0f;
-        pid_reset(&s_pid);
-    }
-
     s_rate_sps = desired_sps;
     stepper_set_rate(s_rate_sps);
 
@@ -336,40 +304,9 @@ void control_get_gains(float *kp, float *ki, float *kd) {
     if (kd) *kd = s_pid.kd;
 }
 
-bool control_set_limits(float min_mm, float max_mm) {
-    if (!isfinite(min_mm) || !isfinite(max_mm)) return false;
-    if (min_mm >= max_mm) return false;
-
-    /* Never allow a software limit outside the sensor's valid envelope. */
-    if (min_mm < (float)HCSR04_MIN_MM) return false;
-    if (max_mm > (float)HCSR04_MAX_MM) return false;
-
-    s_limit_min_mm = min_mm;
-    s_limit_max_mm = max_mm;
-
-    /* If a target already exists, immediately pull it back into the
-     * newly-selected legal travel range.
-     */
-    if (s_target_valid) {
-        if (s_target_mm < s_limit_min_mm) s_target_mm = s_limit_min_mm;
-        if (s_target_mm > s_limit_max_mm) s_target_mm = s_limit_max_mm;
-        pid_reset(&s_pid);
-        s_rate_sps = 0.0f;
-        s_stall_samples = 0;
-    }
-
-    return true;
-}
-
-void control_get_limits(float *min_mm, float *max_mm) {
-    if (min_mm) *min_mm = s_limit_min_mm;
-    if (max_mm) *max_mm = s_limit_max_mm;
-}
-
 void control_set_target_mm(float mm) {
-    /* Clamp every Serial/floor-derived target to the active travel limits. */
-    if (mm < s_limit_min_mm) mm = s_limit_min_mm;
-    if (mm > s_limit_max_mm) mm = s_limit_max_mm;
+    if (mm < (float)HCSR04_MIN_MM) mm = (float)HCSR04_MIN_MM;
+    if (mm > (float)HCSR04_MAX_MM) mm = (float)HCSR04_MAX_MM;
 
     s_target_mm     = mm;
     s_target_valid  = true;
