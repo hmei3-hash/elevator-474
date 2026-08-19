@@ -8,8 +8,23 @@
 
 #include <Arduino.h>
 #include "soc/gpio_struct.h"
+#include "esp_rom_sys.h"      /* esp_rom_delay_us() */
 #include "board_config.h"
 #include "stepper.h"
+
+/* DIR must be stable before the next STEP edge. The TMC2209 datasheet asks
+ * for 20 ns; 5 us is far more than needed and costs nothing, since this runs
+ * only on a rate change and never inside the ISR. */
+#ifndef STEP_DIR_SETUP_US
+#define STEP_DIR_SETUP_US   5
+#endif
+
+/* STEP high time. The TMC2209 requires at least 100 ns; 1 us matches the
+ * bench-proven tmc2209_motor_test and leaves an order of magnitude of
+ * margin. Do not shrink this to save ISR time without an oscilloscope. */
+#ifndef STEP_PULSE_US
+#define STEP_PULSE_US       1
+#endif
 
 /* Timer producing the step pulse train. */
 static hw_timer_t *s_timer = nullptr;
@@ -44,14 +59,23 @@ static void IRAM_ATTR onStepTimer(void) {
     phase += inc;
 
     if (phase < prev) {
-        /* One STEP pulse. */
+        /* One STEP pulse.
+         *
+         * The TMC2209 samples DIR on the rising STEP edge and needs the line
+         * held high for at least 100 ns. The previous version used eight
+         * nops, which at 240 MHz is about 33 ns -- roughly a third of the
+         * requirement. The pulses were emitted and the position counter
+         * advanced, so every software-visible signal said the motor was
+         * being driven, but the driver never sampled a single edge and the
+         * shaft did not move. A pulse too short to be seen is worse than no
+         * pulse at all: it fails while looking exactly like success.
+         *
+         * One microsecond matches tmc2209_motor_test, which is bench-proven
+         * to turn this motor. It costs 1 us of a 25 us ISR period, or 4% of
+         * one core at the full 40 kHz tick -- affordable, and the price of
+         * an edge the hardware actually registers. */
         GPIO.out_w1ts = (1U << PIN_STEPPER_STEP);
-
-        /* TMC2209 minimum STEP high time is tiny; a few CPU nops are enough. */
-        __asm__ __volatile__(
-            "nop; nop; nop; nop; nop; nop; nop; nop;"
-        );
-
+        esp_rom_delay_us(STEP_PULSE_US);
         GPIO.out_w1tc = (1U << PIN_STEPPER_STEP);
 
         s_position += s_dir_forward ? 1 : -1;
@@ -151,19 +175,39 @@ void stepper_set_rate(float steps_per_sec) {
                   4294967296.0f
               );
 
+    /* Order matters, and all three steps are load-bearing.
+     *
+     * 1. Stop the pulse train first. Moving DIR while pulses are still going
+     *    out violates the TMC2209's DIR setup time and costs one step at
+     *    every reversal -- invisible in open loop, which is exactly the kind
+     *    of error that is worth spending three lines to avoid.
+     *
+     * 2. Write DIR unconditionally, and outside the critical section. The
+     *    previous version wrote the pin only when the requested direction
+     *    differed from the cached s_dir_forward. That caches hardware state
+     *    in a variable and then assumes the two can never disagree; once
+     *    they do -- a reset leaving the pin somewhere unexpected, a pinMode
+     *    elsewhere, any path that updates the variable without the pin --
+     *    the condition is false forever and the direction can never be
+     *    corrected again. The saving was one GPIO write per reversal. The
+     *    cost was a state with no way back, which is what made one direction
+     *    work and the other silently do nothing.
+     *
+     *    digitalWrite() is also not IRAM-resident, so calling it with
+     *    interrupts masked was a second hazard independent of the first.
+     *
+     * 3. Only then hand the new rate to the ISR.
+     */
     portENTER_CRITICAL(&s_mux);
+    s_increment = 0;
+    portEXIT_CRITICAL(&s_mux);
 
-    if (forward != s_dir_forward) {
-        s_dir_forward = forward;
+    digitalWrite(PIN_STEPPER_DIR, forward ? HIGH : LOW);
+    esp_rom_delay_us(STEP_DIR_SETUP_US);
 
-        digitalWrite(
-            PIN_STEPPER_DIR,
-            forward ? HIGH : LOW
-        );
-    }
-
-    s_increment = inc;
-
+    portENTER_CRITICAL(&s_mux);
+    s_dir_forward = forward;
+    s_increment   = inc;
     portEXIT_CRITICAL(&s_mux);
 }
 

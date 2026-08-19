@@ -114,6 +114,40 @@ static bool rfid_is_authorized(const input_event_t &ev) {
     ) == 0;
 }
 
+/* -------------------------------------------------------------------------- */
+/* AUTHORIZATION WINDOW                                                       */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * How long an accepted card keeps the car buttons live.
+ *
+ * Before this existed, rfid_is_authorized() only drove the display: every
+ * car button was acted on whether a card had been presented or not, so the
+ * reader was decorative. The window is what makes the access control real.
+ */
+#define ACCESS_WINDOW_MS   20000u
+
+/* millis() at which the current authorization expires. Written and read only
+ * by controlTask, so no lock is needed -- keep it that way. */
+static uint32_t s_access_until_ms = 0;
+
+/* True once a card has ever been accepted. Distinguishes "expired" from
+ * "never authorised" for the log, which are different operator mistakes. */
+static bool s_access_ever_granted = false;
+
+/*
+ * PURPOSE:  Report whether the authorization window is still open.
+ * PARAMS:   now_ms - millis() sampled by the caller this iteration
+ * RETURN:   true while car buttons must be honoured
+ *
+ * Subtract-then-compare against zero rather than comparing the two values
+ * directly: that stays correct across the millis() rollover at 49.7 days.
+ */
+static bool access_is_open(uint32_t now_ms) {
+    if (!s_access_ever_granted) return false;
+    return (int32_t)(now_ms - s_access_until_ms) < 0;
+}
+
 /* Defined in tasks_ui.cpp. */
 extern void lcdTask(void *arg);
 extern void logTask(void *arg);
@@ -129,6 +163,9 @@ extern void cmdTask(void *arg);
 #define LOG_CODE_LINK_REJECTED   0x101   /* wrong version or unknown type     */
 #define LOG_CODE_LINK_DROPPED    0x102   /* RX queue was full                 */
 #define LOG_CODE_LINK_MALFORMED  0x103   /* wrong length, rejected in the ISR */
+#define LOG_CODE_ACCESS_GRANTED  0x110   /* card accepted, value = window (s)  */
+#define LOG_CODE_ACCESS_DENIED   0x111   /* card presented, UID not on the list*/
+#define LOG_CODE_ACCESS_REFUSED  0x112   /* button ignored, value = floor      */
 
 /* How far the ranged distance must move before ultrasonicTask logs it again.
  * A diagnostics choice, not a control constant: nothing reads it, so it can
@@ -259,6 +296,14 @@ static void controlTask(void *arg) {
         while (xQueueReceive(g_q_input, &ev, 0) == pdTRUE) {
             switch (ev.type) {
             case INPUT_EVT_CAR_BUTTON:
+                /* A press outside the authorization window is rejected, not
+                 * queued. Queuing it would make the car move later, when the
+                 * window happens to reopen, with nobody having asked. */
+                if (!access_is_open(now)) {
+                    log_post(TASK_ID_CONTROL, LOG_CODE_ACCESS_REFUSED,
+                             (int32_t)ev.floor);
+                    break;
+                }
                 control_request_floor(ev.floor, REQ_SRC_CAR_BUTTON);
                 log_post(TASK_ID_CONTROL, INPUT_EVT_CAR_BUTTON, ev.floor);
                 break;
@@ -266,6 +311,18 @@ static void controlTask(void *arg) {
             case INPUT_EVT_RFID_CARD: {
                 const bool granted = rfid_is_authorized(ev);
                 ui_note_access(granted);
+
+                if (granted) {
+                    /* Re-presenting a card restarts the full window rather
+                     * than extending it, so the rider can always get another
+                     * clean 20 s without waiting for the old one to lapse. */
+                    s_access_ever_granted = true;
+                    s_access_until_ms     = now + ACCESS_WINDOW_MS;
+                    log_post(TASK_ID_CONTROL, LOG_CODE_ACCESS_GRANTED,
+                             (int32_t)(ACCESS_WINDOW_MS / 1000u));
+                } else {
+                    log_post(TASK_ID_CONTROL, LOG_CODE_ACCESS_DENIED, 0);
+                }
                 break;
             }
 
