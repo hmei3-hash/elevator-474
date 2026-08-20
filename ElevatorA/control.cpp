@@ -288,31 +288,23 @@ void control_step(uint32_t dt_ms) {
     s_rate_sps = desired_sps;
     stepper_set_rate(s_rate_sps);
 
-    /* Stall detection based on OBSERVED motion, not remaining error.
-     * A large error at high speed is normal during a long move.
+    /*
+     * DEMO BUILD:
+     *
+     * The ultrasonic-based software stall detector is intentionally disabled.
+     *
+     * Reason:
+     *   The elevator's motor can move correctly with direct g<mm> commands, but
+     *   the HC-SR04 position update can pause, quantize, or filter slowly around
+     *   some heights.  The old detector interpreted "not enough ultrasonic
+     *   position change over a few samples" as MOTOR STALLED, even when the
+     *   motor subsystem itself was not stalled.
+     *
+     * Keep the hard travel-envelope protection above.  That still prevents the
+     * controller from commanding farther outside 20..198 mm.
      */
-    if (fabsf(s_rate_sps) >= CTRL_ULTRA_STALL_MIN_RATE_SPS) {
-        if (s_stall_samples == 0) s_stall_start_mm = pos;
-        s_stall_samples++;
-
-        if (s_stall_samples >= CTRL_ULTRA_STALL_SAMPLES) {
-            const float moved_mm = fabsf(pos - s_stall_start_mm);
-
-            if (moved_mm < CTRL_ULTRA_STALL_MIN_MOVE_MM) {
-                s_stalled = true;
-                stepper_emergency_stop();
-                s_rate_sps = 0.0f;
-                shared_state_raise_fault(FAULT_STEPPER_STALL);
-                return;
-            }
-
-            s_stall_samples  = 0;
-            s_stall_start_mm = pos;
-        }
-    } else {
-        s_stall_samples  = 0;
-        s_stall_start_mm = pos;
-    }
+    s_stall_samples  = 0;
+    s_stall_start_mm = pos;
 }
 
 void control_emergency_stop(uint32_t cause) {

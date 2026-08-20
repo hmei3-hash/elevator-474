@@ -42,8 +42,8 @@
 /* Conservative ultrasonic-feedback motion limits.
  * Raise only after the loop direction and sensing are verified.
  */
-#define CTRL_ULTRA_MAX_SPS            400.0f
-#define CTRL_ULTRA_MAX_ACCEL_SPS2     1200.0f
+#define CTRL_ULTRA_MAX_SPS            800.0f
+#define CTRL_ULTRA_MAX_ACCEL_SPS2     2400.0f
 
 /* +1: positive PID output -> positive step rate.
  * -1: positive PID output -> negative step rate.
@@ -53,7 +53,7 @@
 /* PID gains. Output is directly in steps/s.
  * Start at zero intentionally; enable P on the bench after direction check.
  */
-#define CTRL_ULTRA_KP                 2.5f
+#define CTRL_ULTRA_KP                 8.0f
 #define CTRL_ULTRA_KI                 0.0f
 #define CTRL_ULTRA_KD                 0.0f
 
