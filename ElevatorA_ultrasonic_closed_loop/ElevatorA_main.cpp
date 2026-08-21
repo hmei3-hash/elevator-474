@@ -85,69 +85,6 @@ static hw_timer_t *s_control_timer;
 static volatile uint32_t s_drop_input;
 static volatile uint32_t s_drop_log;
 
-/* -------------------------------------------------------------------------- */
-/* RFID ACCESS POLICY                                                         */
-/* -------------------------------------------------------------------------- */
-
-/*
- * Authorized RC522 card UID.
- *
- * Card ID supplied:
- *     0x2360FB27
- *
- * Compare byte-by-byte in the same order returned by the MFRC522:
- *     23 60 FB 27
- */
-static const uint8_t AUTHORIZED_RFID_UID[] = {
-    0x23, 0x60, 0xFB, 0x27
-};
-
-static bool rfid_is_authorized(const input_event_t &ev) {
-    if (ev.uid_len != sizeof(AUTHORIZED_RFID_UID)) {
-        return false;
-    }
-
-    return memcmp(
-        ev.uid,
-        AUTHORIZED_RFID_UID,
-        sizeof(AUTHORIZED_RFID_UID)
-    ) == 0;
-}
-
-/* -------------------------------------------------------------------------- */
-/* AUTHORIZATION WINDOW                                                       */
-/* -------------------------------------------------------------------------- */
-
-/*
- * How long an accepted card keeps the car buttons live.
- *
- * Before this existed, rfid_is_authorized() only drove the display: every
- * car button was acted on whether a card had been presented or not, so the
- * reader was decorative. The window is what makes the access control real.
- */
-#define ACCESS_WINDOW_MS   20000u
-
-/* millis() at which the current authorization expires. Written and read only
- * by controlTask, so no lock is needed -- keep it that way. */
-static uint32_t s_access_until_ms = 0;
-
-/* True once a card has ever been accepted. Distinguishes "expired" from
- * "never authorised" for the log, which are different operator mistakes. */
-static bool s_access_ever_granted = false;
-
-/*
- * PURPOSE:  Report whether the authorization window is still open.
- * PARAMS:   now_ms - millis() sampled by the caller this iteration
- * RETURN:   true while car buttons must be honoured
- *
- * Subtract-then-compare against zero rather than comparing the two values
- * directly: that stays correct across the millis() rollover at 49.7 days.
- */
-static bool access_is_open(uint32_t now_ms) {
-    if (!s_access_ever_granted) return false;
-    return (int32_t)(now_ms - s_access_until_ms) < 0;
-}
-
 /* Defined in tasks_ui.cpp. */
 extern void lcdTask(void *arg);
 extern void logTask(void *arg);
@@ -163,9 +100,6 @@ extern void cmdTask(void *arg);
 #define LOG_CODE_LINK_REJECTED   0x101   /* wrong version or unknown type     */
 #define LOG_CODE_LINK_DROPPED    0x102   /* RX queue was full                 */
 #define LOG_CODE_LINK_MALFORMED  0x103   /* wrong length, rejected in the ISR */
-#define LOG_CODE_ACCESS_GRANTED  0x110   /* card accepted, value = window (s)  */
-#define LOG_CODE_ACCESS_DENIED   0x111   /* card presented, UID not on the list*/
-#define LOG_CODE_ACCESS_REFUSED  0x112   /* button ignored, value = floor      */
 
 /* How far the ranged distance must move before ultrasonicTask logs it again.
  * A diagnostics choice, not a control constant: nothing reads it, so it can
@@ -173,28 +107,6 @@ extern void cmdTask(void *arg);
  * standstill jitter (log boardA_20260818_142344: 41/42/43 mm at rest) and
  * far below the smallest car movement worth seeing. */
 #define ULTRASONIC_LOG_DELTA_MM  5
-
-#define ULTRASONIC_NEAR_ECHO_WINDOW 3
-#define ACTIVE_FLOORS                 2u
-
-/*
- * HC-SR04 near-echo suppressor.
- *
- * Bench observation:
- *   physical distance ~= 39 mm
- *   raw sensor stream alternates ~= 29 mm, 39 mm, 29 mm, 39 mm...
- *
- * The false echo is consistently SHORTER than the real target echo.
- * Therefore we keep a rolling 3-sample window and use its MAXIMUM.
- *
- * At 60 ms/sample this adds at most ~120 ms of lag while moving toward
- * the sensor, but it suppresses the repeatable near-field false echo without
- * hard-coding "39 mm" or any particular floor distance.
- *
- * The controller is not fed until the window has been primed with three
- * valid measurements. This prevents a false 29 mm first sample from becoming
- * the power-up hold target.
- */
 
 /*
  * ============================================================================
@@ -296,35 +208,17 @@ static void controlTask(void *arg) {
         while (xQueueReceive(g_q_input, &ev, 0) == pdTRUE) {
             switch (ev.type) {
             case INPUT_EVT_CAR_BUTTON:
-                /* A press outside the authorization window is rejected, not
-                 * queued. Queuing it would make the car move later, when the
-                 * window happens to reopen, with nobody having asked. */
-                if (!access_is_open(now)) {
-                    log_post(TASK_ID_CONTROL, LOG_CODE_ACCESS_REFUSED,
-                             (int32_t)ev.floor);
-                    break;
-                }
                 control_request_floor(ev.floor, REQ_SRC_CAR_BUTTON);
                 log_post(TASK_ID_CONTROL, INPUT_EVT_CAR_BUTTON, ev.floor);
                 break;
 
-            case INPUT_EVT_RFID_CARD: {
-                const bool granted = rfid_is_authorized(ev);
-                ui_note_access(granted);
-
-                if (granted) {
-                    /* Re-presenting a card restarts the full window rather
-                     * than extending it, so the rider can always get another
-                     * clean 20 s without waiting for the old one to lapse. */
-                    s_access_ever_granted = true;
-                    s_access_until_ms     = now + ACCESS_WINDOW_MS;
-                    log_post(TASK_ID_CONTROL, LOG_CODE_ACCESS_GRANTED,
-                             (int32_t)(ACCESS_WINDOW_MS / 1000u));
-                } else {
-                    log_post(TASK_ID_CONTROL, LOG_CODE_ACCESS_DENIED, 0);
-                }
+            case INPUT_EVT_RFID_CARD:
+                /* TODO: compare ev.uid against the authorised card list and
+                 *       decide what a valid card is allowed to do. The list
+                 *       itself is application policy and needs the real card
+                 *       UIDs, which are read with bringup_a's 'c' command. */
+                ui_note_access(false);
                 break;
-            }
 
             default:
                 break;
@@ -370,87 +264,38 @@ static void ultrasonicTask(void *arg) {
     hcsr04_reading_t r;
     uint32_t consecutive_bad = 0;
 
-    /*
-     * Rolling upper-envelope filter.
-     *
-     * Our real target is ~39 mm while the HC-SR04 repeatedly produces a
-     * false near echo at ~29 mm. Since that failure mode is "too short",
-     * taking the maximum of a short rolling window rejects it.
-     */
-    uint16_t range_window[ULTRASONIC_NEAR_ECHO_WINDOW] = {0};
-    uint8_t  range_index = 0;
-    uint8_t  range_count = 0;
-
-    /* Last ACCEPTED distance written to the log. */
+    /* Last distance actually written to the log. UINT16_MAX means "nothing
+     * reported yet", so the first valid reading always appears. */
     uint16_t last_reported_mm = UINT16_MAX;
 
     for (;;) {
-        /*
-         * Collect before triggering: the result belongs to the ping started
-         * one period ago. The driver is interrupt driven and never blocks.
-         */
+        /* Collect before triggering: the result belongs to the ping started
+         * one period ago. The driver is interrupt driven and never blocks. */
         if (hcsr04_collect(&r) && r.valid) {
             consecutive_bad = 0;
 
-            /* Insert this raw measurement into the rolling window. */
-            range_window[range_index] = r.distance_mm;
-            range_index =
-                (uint8_t)((range_index + 1) % ULTRASONIC_NEAR_ECHO_WINDOW);
-
-            if (range_count < ULTRASONIC_NEAR_ECHO_WINDOW) {
-                range_count++;
+            /* HC-SR04 is now the PRIMARY closed-loop position feedback. */
+            control_update_ultrasonic(r.distance_mm, millis());
+            /* Report a CHANGE, not a sample. Logging all 16 readings per
+             * second produced ~30 lines/s of "the car has not moved", which
+             * is not evidence of anything -- and the flood overran the USB
+             * CDC transmit buffer, which drops bytes silently and spliced
+             * unrelated log lines together mid-number. A log that corrupts
+             * itself under load is worse than no log. */
+            if (last_reported_mm == UINT16_MAX ||
+                (uint16_t)abs((int32_t)r.distance_mm - (int32_t)last_reported_mm)
+                    >= ULTRASONIC_LOG_DELTA_MM) {
+                last_reported_mm = r.distance_mm;
+                log_post(TASK_ID_ULTRASONIC, 0, (int32_t)r.distance_mm);
             }
-
-            /*
-             * Do not feed the controller until the filter is fully primed.
-             * This avoids booting on one false 29 mm near echo.
-             */
-            if (range_count == ULTRASONIC_NEAR_ECHO_WINDOW) {
-                uint16_t accepted_mm = range_window[0];
-
-                for (uint8_t i = 1;
-                     i < ULTRASONIC_NEAR_ECHO_WINDOW;
-                     ++i) {
-                    if (range_window[i] > accepted_mm) {
-                        accepted_mm = range_window[i];
-                    }
-                }
-
-                /*
-                 * HC-SR04 is the PRIMARY closed-loop position feedback.
-                 * Only the anti-near-echo filtered measurement reaches PID.
-                 */
-                control_update_ultrasonic(accepted_mm, millis());
-
-                /*
-                 * Log the accepted distance, not the raw false echo.
-                 * With the observed 29/39 alternating stream this should
-                 * become approximately 38/39/40 instead of 29/39/29/39.
-                 */
-                if (last_reported_mm == UINT16_MAX ||
-                    (uint16_t)abs((int32_t)accepted_mm -
-                                  (int32_t)last_reported_mm)
-                        >= ULTRASONIC_LOG_DELTA_MM) {
-                    last_reported_mm = accepted_mm;
-                    log_post(TASK_ID_ULTRASONIC, 0, (int32_t)accepted_mm);
-                }
-            }
-
         } else {
             consecutive_bad++;
-
-            /*
-             * One missed echo is ordinary. A run means the primary position
-             * sensor is lost. Re-prime the filter after a real loss so stale
-             * pre-fault distances cannot influence the recovered position.
-             */
+            /* One missed echo is ordinary -- a bad angle, a soft target.
+             * A run of them means the sensor is not seeing the car. */
             if (consecutive_bad >= HCSR04_FAULT_AFTER_MISSES) {
-                range_count = 0;
-                range_index = 0;
                 shared_state_raise_fault(FAULT_ULTRASONIC_LOST);
             }
         }
-
         hcsr04_trigger();
         vTaskDelayUntil(&last, pdMS_TO_TICKS(PERIOD_MS_ULTRASONIC));
     }
@@ -625,18 +470,16 @@ static void inputTask(void *arg) {
     (void)arg;
     TickType_t last = xTaskGetTickCount();
 
-    /* Two-floor build: only Floor 1 and Floor 2 buttons are active.
-     * Internal floor indices are 0 and 1 respectively. */
-    static const uint8_t pins[ACTIVE_FLOORS] = {
-        PIN_BTN_CAR_0, PIN_BTN_CAR_1
+    static const uint8_t pins[NUM_FLOORS] = {
+        PIN_BTN_CAR_0, PIN_BTN_CAR_1, PIN_BTN_CAR_2
     };
     /* Consecutive samples each button has read pressed. A press is accepted
      * once, on the sample where the count crosses the threshold, so holding
      * a button does not queue an event every 5 ms. */
-    static uint8_t stable[ACTIVE_FLOORS];
+    static uint8_t stable[NUM_FLOORS];
 
     for (;;) {
-        for (uint8_t i = 0; i < ACTIVE_FLOORS; i++) {
+        for (uint8_t i = 0; i < NUM_FLOORS; i++) {
             bool down = (digitalRead(pins[i]) == LOW);   /* INPUT_PULLUP */
 
             if (!down) { stable[i] = 0; continue; }
@@ -735,9 +578,9 @@ void setup() {
     for (uint8_t i = 0; i < NUM_FLOORS; i++) {
         /* INPUT_PULLUP, so a button shorts to GND and needs no resistor. */
     }
-    pinMode(PIN_BTN_CAR_0, INPUT_PULLUP);  /* Floor 1 */
-    pinMode(PIN_BTN_CAR_1, INPUT_PULLUP);  /* Floor 2 */
-    /* PIN_BTN_CAR_2 intentionally unused in this two-floor build. */
+    pinMode(PIN_BTN_CAR_0, INPUT_PULLUP);
+    pinMode(PIN_BTN_CAR_1, INPUT_PULLUP);
+    pinMode(PIN_BTN_CAR_2, INPUT_PULLUP);
 
     /* Drivers. A failure here latches a fault rather than halting: the
      * elevator can still run degraded without a card reader or a display,
@@ -749,30 +592,11 @@ void setup() {
      * masks a failed display, and the log carries no init record at all.
      * One line per driver at boot costs nothing and turns "the LCD is
      * blank" from a guess into a reading. */
-    /*
-     * IMPORTANT INIT ORDER:
-     * Install the HC-SR04 GPIO interrupt service BEFORE starting the
-     * stepper's high-frequency hardware timer ISR.
-     *
-     * Arduino-ESP32 installs the shared GPIO ISR service on the first
-     * attachInterrupt() call. Starting the 40 kHz STEP timer first can
-     * interfere with that IPC-backed initialization on ESP32-S3.
-     */
-    Serial.println(F("[INIT] HC-SR04 begin"));
-    const bool ok_hcsr04 = hcsr04_init();
-    Serial.printf("[INIT] HC-SR04 done: %s\n", ok_hcsr04 ? "OK" : "FAIL");
-
-    Serial.println(F("[INIT] stepper begin"));
     const bool ok_stepper = stepper_init();
-    Serial.printf("[INIT] stepper done: %s\n", ok_stepper ? "OK" : "FAIL");
-
-    Serial.println(F("[INIT] RC522 begin"));
-    const bool ok_rc522 = rc522_init();
-    Serial.printf("[INIT] RC522 done: %s\n", ok_rc522 ? "OK" : "FAIL");
-
-    Serial.println(F("[INIT] LCD begin"));
-    const bool ok_lcd = lcd_ui_init();
-    Serial.printf("[INIT] LCD done: %s\n", ok_lcd ? "OK" : "FAIL");
+    const bool ok_hcsr04  = hcsr04_init();
+    const bool ok_rc522   = rc522_init();
+    /* LCD is the only remaining application I2C device. */
+    const bool ok_lcd     = lcd_ui_init();
 
     if (!ok_stepper) shared_state_raise_fault(FAULT_STEPPER_STALL);
     if (!ok_hcsr04)  shared_state_raise_fault(FAULT_ULTRASONIC_LOST);
@@ -784,9 +608,6 @@ void setup() {
     Serial.printf("  ultrasonic (HC-SR04)%s\n", ok_hcsr04  ? " OK" : " FAIL");
     Serial.printf("  rfid (RC522, SPI)   %s\n", ok_rc522   ? "OK" : "FAIL");
     Serial.printf("  lcd (I2C)           %s\n", ok_lcd     ? "OK" : "FAIL");
-    Serial.println(F("--- floor map ---"));
-    Serial.println(F("  Floor 1 = 30 mm"));
-    Serial.println(F("  Floor 2 = 153 mm"));
 
     if (!link_init()) {
         Serial.println(F("FATAL: ESP-NOW would not start. Halting."));

@@ -91,8 +91,19 @@ static uint32_t s_log_suppressed;
 static bool s_access_shown;
 static uint32_t s_access_until_ms;
 
-/* How long an access verdict stays on the panel before row 1 reverts. */
-#define UI_ACCESS_HOLD_MS   3000
+/* How long an access verdict stays on the panel before row 1 reverts.
+ *
+ * Kept equal to ACCESS_WINDOW_MS in ElevatorA_main.cpp so the panel stops
+ * showing ACCESS GRANTED at the same instant the buttons stop being
+ * accepted. A display that outlives the permission it reports is worse than
+ * no display: the rider reads GRANTED, presses a floor, and nothing happens.
+ *
+ * A DENIED verdict is not a permission window, so it is held only briefly --
+ * see ui_note_access(). */
+#define UI_ACCESS_HOLD_MS   20000
+
+/* How long a DENIED verdict stays up. Short: nothing is unlocked by it. */
+#define UI_DENIED_HOLD_MS   3000
 
 /*
  * ============================================================================
@@ -240,7 +251,8 @@ static void ui_format_access_line(const system_state_t *st, uint32_t now_ms,
  */
 void ui_note_access(bool granted) {
     s_access_shown    = granted;
-    s_access_until_ms = millis() + UI_ACCESS_HOLD_MS;
+    s_access_until_ms = millis() +
+                        (granted ? UI_ACCESS_HOLD_MS : UI_DENIED_HOLD_MS);
 }
 
 /*

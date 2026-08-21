@@ -8,11 +8,19 @@ Two-board ESP32 smart elevator. CSE/EE 474 Embedded Systems final project.
 
 ## Status
 
-**Drivers integrated and bench-verified. Mechanics not built.**
+**Delivered. Demonstrated on hardware 08/21/2026.**
 
-Every peripheral except the stepper's UART channel has answered on the
-bench. No end-to-end run has happened, and every row in
-[`docs/vv_table.md`](docs/vv_table.md) is still `NOT TESTED`.
+The car closes a feedback loop and travels between both floor setpoints in
+both directions, and both safety paths work: a detected fall stops the car,
+and cutting power to the fall detector also stops it, under a distinct fault
+code. Video: <https://youtu.be/DBCa3tUcbC8>
+
+What is *not* finished is evidence, not function. Several checks in
+[`docs/vv_table.md`](docs/vv_table.md) remain `NOT TESTED`, and two are
+honest failures rather than omissions — see [Verification and
+validation](#verification-and-validation). We have not promoted a row on the
+strength of a run that happened to succeed; a single clean run is not the
+acceptance criterion any of them states.
 
 Each module was proven as a standalone sketch first and only then folded
 into the layered structure here — see [Approval
@@ -24,24 +32,55 @@ themselves.
 | Component | State |
 |---|---|
 | Repository structure | Complete |
-| Task/core/priority plan | Complete, not yet validated on hardware |
-| Link protocol | Defined, both copies verified identical |
-| Pin assignments | `board_config.h` is authoritative; A-board wiring in progress |
-| Driver bodies | **Integrated from bench-proven prototypes**: IMU, stepper, encoder, RFID, LCD, ultrasonic, link |
-| Control policy | Servo loop integrated; floor mapping and homing await the built shaft |
-| Fall detection | **Thresholds derived from 246 s of labelled bench data**; detector not yet written |
-| Host-testable logic | PID filled; moving average and test cases still stubs |
-| PID gains | `0.0f` on purpose — tuned at 1 kHz, must be retuned at 100 Hz |
-| Stack sizes, queue depths | Placeholders pending measurement |
-| Mechanical build | **Not started. The critical path.** |
+| Task/core/priority plan | Complete, running on hardware |
+| Link protocol | Both copies verified byte-identical |
+| Pin assignments | `board_config.h` is authoritative |
+| Driver bodies | Complete. Zero `TODO` remaining in any `.cpp` |
+| Control policy | Complete: floor requests, target selection, closed loop, emergency stop |
+| Feedback sensor | **HC-SR04 rangefinder.** The AS5600 encoder was removed late — see [note](#the-feedback-sensor-changed-late) |
+| Fall detection | Complete. Thresholds from 246 s of labelled bench data. **8 detections in 10** |
+| Access control | 20-second authorisation window, gating the car buttons |
+| PID gains | `CTRL_ULTRA_KP = 2.5`, Ki and Kd zero. Proportional-only was sufficient |
+| Stack sizes, queue depths | Workable values with margin. **Not measured** — no high-water probe was run |
+| Mechanical build | Complete: two floors at 30 mm and 153 mm |
+
+### The feedback sensor changed late
+
+The design in this README was written around the AS5600 magnetic encoder as
+the loop sensor, chosen because it is quiet and absolute. It was removed
+during the final week and the ultrasonic rangefinder became the primary
+feedback.
+
+The reason is that the encoder reads the *motor shaft*, so it cannot observe
+a slipping line — it reports the position the motor was commanded to reach,
+which is the one thing a position sensor must not do. The rangefinder
+measures the car itself. It is much noisier, and the loop pays for that with
+a 5 mm deadband where the encoder would have allowed a fraction of a
+millimetre, but it measures the quantity that actually matters.
+
+The rangefinder produces a false near echo at roughly 29 mm against a real
+target near 39 mm. Because that failure mode is always *short*, a rolling
+upper-envelope filter — the maximum of a short window — rejects it.
+
+Sections below that describe the encoder as the loop sensor reflect the
+original design and are left in place deliberately: the reasoning was sound
+when written, and replacing it would erase why the substitution was needed.
 
 ---
 
 ## What it does
 
-An elevator car travels between three floors under closed-loop position
-control. Passengers select a floor from a panel inside the car, or present
-an RFID card. A character LCD shows the current mode, direction, and floor.
+An elevator car travels between floor setpoints under closed-loop position
+control, driven by a 100 Hz loop closed around an ultrasonic rangefinder.
+The shipped build has two floors, at 30 mm and 153 mm; the third setpoint is
+present in the configuration and disabled.
+
+A rider presents an RFID card, which opens a twenty-second authorisation
+window. Inside that window the three car-panel buttons are served; outside
+it a press is refused and logged rather than queued — a queued press would
+move the car later, when the window next opens, with nobody having asked. A
+character LCD shows the floor, direction, access verdict, and any latched
+fault.
 
 A second, physically separate board watches for a fall using an inertial
 sensor. It has no wires to the elevator — it talks over ESP-NOW. If it
@@ -550,13 +589,159 @@ ramp, and the motor stalled immediately.
 **Fix.** Acceleration limiting exists in `control.cpp` for exactly this
 reason; the test is the only place it was missing.
 
+### 14. A 33-nanosecond step pulse
+
+The motor would not turn. Every software observable said it was being
+driven: the commanded position advanced, the reported rate was non-zero, and
+a multimeter on STEP and DIR read normal.
+
+The pulse was eight `nop` instructions — roughly 33 ns at 240 MHz, against
+the TMC2209's 100 ns minimum. The signal was present and simply too narrow
+for the driver to sample, which is precisely the failure a voltmeter cannot
+see.
+
+What found it was not more measurement but a comparison: diffing the driver
+against a throwaway sketch known to turn the motor. **When every instrument
+agrees the system is working and it is not, the instrument is measuring the
+wrong property, and a known-good reference is worth more than another
+reading.**
+
+### 15. A direction pin written only on change
+
+The direction output was written only when the requested direction differed
+from a cached copy of it. Once the cache and the hardware disagreed — after
+any missed write — the axis could never recover. The step train was also
+left running across the reversal, losing a step on every change of
+direction, and the pin was written from inside a critical section using a
+non-IRAM function.
+
+The fix is four steps in a necessary order: zero the increment, write the
+pin unconditionally outside the critical section, honour a setup delay,
+restore the increment. **Caching a hardware state you cannot read back is a
+bet that nothing else will ever touch it.**
+
+### 16. One cause wearing three costumes
+
+For part of an afternoon we chased three faults: the motor would not move,
+the status command did not answer, and the buttons did nothing.
+
+They were one fault. The USB cable was in the UART socket rather than the
+native USB socket, and with `ARDUINO_USB_CDC_ON_BOOT=1` the application's
+serial output goes to the native port. The firmware was running and
+completely mute. The ROM bootloader banner still appeared — it comes out of
+the UART port — which is exactly why the board looked alive.
+
+**Confirm the program is running before reasoning about its logic.** The
+value of the `Board A running.` line had been underrated all week.
+
+### 17. A hypothesis that could not be cheaply falsified
+
+Board A reported a link timeout with all four diagnostic counters at zero.
+That is exactly the signature of a peer MAC pointing at the wrong board, and
+the address had been recorded days earlier with no way to re-check it. We
+treated it as the prime suspect for hours.
+
+It was correct all along. What finally settled it was a probe that both
+boards run unmodified and that broadcasts to `FF:FF:FF:FF:FF:FF`, removing
+the peer address from the experiment entirely: 1106 frames over 264 s with
+zero loss, using the same address the firmware uses.
+
+The real cause was on the other board. `ElevatorB`'s `setup()` initialises
+the IMU *before* Wi-Fi, ESP-NOW or the transmit task, and halts on failure,
+so a detector whose IMU does not answer never sends a single heartbeat. The
+halt is correct — a fall detector that cannot sense should not pretend to
+work — but it makes an IMU fault present as a link fault, and Board A cannot
+tell that from an unplugged board. That indistinguishability *is* the
+safe-on-silence design.
+
+**A plausible hypothesis that cannot be cheaply falsified will absorb
+unlimited time. Build the falsifier first.** We had also read Board A's
+serial output all week and never once opened Board B's.
+
+### 18. A log that destroyed its own evidence
+
+Log lines arrived spliced together mid-number. The ranging task logged every
+sample at 16 Hz and the load task every 1024 primes, overrunning the USB CDC
+transmit buffer — which drops bytes *silently*, so the failure looks like
+corrupted data rather than lost output.
+
+Ranging now logs on change, the load counter reports every 65536, and
+emission is capped at 40 lines per second inside `logTask` with the number
+of suppressed lines printed. The cap is the durable part: a flood cannot be
+prevented at the source without knowing in advance which source will flood,
+so it is bounded at the one point every line passes through. The count
+matters as much as the cap — **"twelve thousand lines were dropped" and
+"nothing happened" must not look the same on the wire.**
+
+### 19. A driver failure that printed nothing
+
+`setup()` latched a fault bit on a failed driver init and said nothing.
+Because the panel renders only the highest-priority fault, a link timeout
+masked a failed display entirely, and the log carried no init record at all.
+"The LCD is blank" was a guess with no reading behind it.
+
+Now every driver prints `OK`/`FAIL` at boot, and an I2C bus scan runs
+*before* any driver touches the bus, at both 100 kHz and the configured
+speed. A driver reporting `FAIL` cannot distinguish a wrong address from bad
+wiring from a bus clocked faster than the part can follow — and those three
+need opposite fixes.
+
+### 20. Telemetry slower than the process it measured
+
+The tuning stream ran at 10 Hz against a 100 Hz control loop. A step
+response settling in 200 ms would leave two samples, from which neither
+overshoot nor settling time can be read. **Sampling ten times slower than
+the process does not give a coarse picture of it; it gives none.**
+
+Raising the stream alone was not enough — `cmdTask` itself only woke at
+20 Hz, so the faster stream would have been silently capped by its own task
+rate.
+
+
 ---
 
 ## Verification and validation
 
 [`docs/vv_table.md`](docs/vv_table.md) holds 16 rows across four tiers:
 unit (host), integration (instrumented on-target), hardware (per
-peripheral), and system (end-to-end behaviour).
+peripheral), and system (end-to-end behaviour). The full tables, with
+per-subsystem build, normal, boundary and fault checks, are in the AI report
+submitted alongside this repository.
+
+**Outcome.**
+
+| Check | Status | Note |
+|---|---|---|
+| Host logic suite | PASS | 7 cases, 0 failures, exit 0, clean under `-Wall -Wextra` |
+| Protocol copies identical | PASS | `diff` of the two `link_protocol.h` copies is empty |
+| Both builds | PASS | Both PlatformIO environments build |
+| Closed-loop positioning | PASS | Reaches and holds a commanded height; decelerates as the error shrinks |
+| Repeated bidirectional travel | PASS | Runs up and down between both setpoints |
+| Link loss stops the car | PASS | `FAULT_LINK_TIMEOUT`; the bit clears on the first heartbeat back |
+| Fall stops the car | PASS | Distinct fault code from a link loss |
+| Car buttons, panel, ranging | PASS | Demonstrated in normal operation |
+| Authorisation window | PASS | Served inside the window, refused after expiry |
+| **Fall detection rate** | **FAIL** | **8 in 10 across 20 drops. The check accepts only a full rate** |
+| **Motion driver init** | **FAIL** | **TMC2209 UART returns `0x00` — PDN_UART is unwired by decision** |
+| Link idle | PARTIAL | 2 minutes clean; the check asks for 5 |
+| Stack and queue sizing | NOT MEASURED | Nothing overflowed, but absence of failure is not a measured margin |
+| Jitter, fall negatives, button repeatability, fault injection | NOT TESTED | Require sustained collection we ran out of time for |
+
+**On the 8 in 10.** The thresholds are unlikely to be the cause. In the
+clean logged data the two populations do not overlap anywhere: normal
+handling never went below 0.66 g and never spent a millisecond under 0.5 g,
+while every real drop reached 0.08–0.22 g and stayed there for 65–255 ms. A
+miss is far more likely a drop too short to accumulate the 40 ms the
+free-fall stage requires than a threshold set wrong.
+
+Requiring free fall *before* impact is what buys zero false positives. A
+rule firing on impact alone would have caught both misses — and would also
+fire when the rig is set down briskly on a table, which is exactly the false
+positive an elevator must not have. We chose a rule whose failures are
+misses rather than false alarms, then measured a miss rate we did not have
+time to reduce. Shortening the free-fall window and re-running the negative
+set is the obvious next experiment. We did not run it, so we do not claim it
+would work.
 
 ### Evidence policy
 
@@ -605,8 +790,8 @@ Hongyi does the wiring, the verify, the upload, and grants PASS.
 
 | | |
 |---|---|
-| Hongyi Mei | Board A: control, motion, sensing, UI. Integration and sign-off. |
-| Kevin Bi | Board B: IMU, fall detection, transmit path. |
+| Hongyi Mei (2564361) | Repository architecture and layering; task, core and priority assignment; link protocol and fail-safe posture; drivers and bring-up diagnostics; the step-pulse and direction fixes; RFID authorisation; V&V design and sign-off. |
+| Kevin Bi (2462768) | Board B: IMU, fall detection and transmit path. Ultrasonic closed-loop control and floor calibration; the sensor substitution; mechanical assembly and demonstration support. |
 
 The link protocol is the contract between the two halves. It was frozen
 before either half was written, so the boards could be developed in
